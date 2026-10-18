@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Page HLS Player</title>
+
+  <style>
+    body {
+      padding: 14px;
+      margin: 0;
+      background: #111827;
+      color: #f9fafb;
+      font: 14px Arial, sans-serif;
+    }
+
+    h2 {
+      margin-top: 0;
+    }
+
+    select, button {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 10px;
+      margin: 5px 0;
+      border-radius: 6px;
+    }
+
+    select {
+      color: white;
+      background: #1f2937;
+      border: 1px solid #4b5563;
+    }
+
+    button {
+      color: white;
+      background: #2563eb;
+      border: none;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    video {
+      width: 100%;
+      background: black;
+      border-radius: 8px;
+      margin-top: 12px;
+    }
+
+    #status {
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    .stream {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      margin: 7px 0;
+      color: white;
+      background: #1f2937;
+      border: 1px solid #374151;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+
+    .stream.selected {
+      border-color: #60a5fa;
+      background: #1e3a5f;
+    }
+
+    .hint {
+      color: #9ca3af;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    /* Tab navigation */
+    .tab-nav {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      background: #1f2937;
+      border-radius: 6px;
+      padding: 4px;
+    }
+
+    .tab-nav button {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: #6b7280;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .tab-nav button:hover {
+      background: #374151;
+      color: #f9fafb;
+    }
+
+    .tab-nav button.active {
+      background: #2563eb;
+      color: #f9fafb;
+    }
+
+    /* Tab content panels */
+    .tab-content {
+      display: none;
+      background: #1f2937;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      padding: 12px;
+      margin-top: 8px;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    /* Logs area */
+    #logsArea {
+      height: 150px;
+      overflow-y: auto;
+      background: #0d1117;
+      border-radius: 4px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #d1d5db;
+      white-space: pre-wrap;
+    }
+
+    .log-entry {
+      padding: 2px 0;
+      border-bottom: 1px solid #374151;
+      margin: 2px 0;
+    }
+
+    .log-entry.timestamp {
+      color: #8884dc;
+    }
+
+    .log-entry.level-info { color: #3b82f6; }
+    .log-entry.level-warning { color: #f59e0b; }
+    .log-entry.level-error { color: #ef4444; }
+  </style>
+</head>
+
+<body>
+  <h2>Page HLS Player</h2>
+
+  <label for="tabSelect">Website tab</label>
+  <select id="tabSelect">
+    <option value="">Loading browser tabs...</option>
+  </select>
+
+  <button id="refreshTabs">Refresh tabs</button>
+  <button id="scan">Grant access & scan selected tab</button>
+
+  <p id="status" role="status">
+    Select your website tab, log in, and start the video.
+  </p>
+
+  <!-- Tab navigation -->
+  <div class="tab-nav" id="tabNav">
+    <button class="active" data-tab="streams">Streams</button>
+    <button data-tab="logs">Logs</button>
+  </div>
+
+  <!-- Tab content panels -->
+  <div class="tab-content active" id="tabStreams">
+    <h3>Detected playlists</h3>
+    <div id="streams"></div>
+  </div>
+
+  <div class="tab-content" id="tabLogs">
+    <div>Extension operation logs:</div>
+    <div id="logsArea">--- Logs not available until extension initializes ---</div>
+  </div>
+
+  <video id="video" controls playsinline></video>
+
+  <p class="hint">
+    Playback depends on the site's authorization and CDN CORS policy.
+    This extension does not bypass login or DRM.
+  </p>
+
+  <script src="hls.min.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
