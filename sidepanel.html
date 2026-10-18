@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <title>Page HLS Player</title>
+  <title>HLS Side Panel Pro</title>
 
   <style>
     body {
@@ -153,11 +153,57 @@
     .log-entry.level-info { color: #3b82f6; }
     .log-entry.level-warning { color: #f59e0b; }
     .log-entry.level-error { color: #ef4444; }
+
+
+    .recording-panel {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      background: #111827;
+    }
+
+    .recording-panel h3 { margin: 0 0 8px; }
+
+    #recordingStatus {
+      padding: 8px;
+      border-radius: 6px;
+      background: #1f2937;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    #recordingStatus[data-state="recording"] { color: #fca5a5; }
+    #recordingStatus[data-state="success"] { color: #86efac; }
+    #recordingStatus[data-state="error"] { color: #fca5a5; }
+    #recordingStatus[data-state="working"] { color: #fcd34d; }
+
+    #recordingTimer {
+      margin: 10px 0;
+      font-size: 28px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+      letter-spacing: 1px;
+    }
+
+    .recording-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .recording-actions button { margin: 0; }
+    #stopRecording { background: #b91c1c; }
+    #removeSitePlayer { grid-column: 1 / -1; background: #374151; }
+
   </style>
 </head>
 
 <body>
-  <h2>Page HLS Player</h2>
+  <h2>HLS Side Panel Pro</h2>
 
   <label for="tabSelect">Website tab</label>
   <select id="tabSelect">
@@ -181,6 +227,20 @@
   <div class="tab-content active" id="tabStreams">
     <h3>Detected playlists</h3>
     <div id="streams"></div>
+
+    <section class="recording-panel" aria-label="WebM recorder">
+      <h3>WebM Recorder</h3>
+      <div id="recordingStatus" role="status" aria-live="polite" data-state="idle">
+        Run Test Site HLS Player and start playback first.
+      </div>
+      <div id="recordingTimer" aria-label="Recording duration">00:00</div>
+      <div class="recording-actions">
+        <button id="startRecording" disabled>Start Recording</button>
+        <button id="stopRecording" disabled>Stop &amp; Download</button>
+        <button id="removeSitePlayer" disabled>Remove Temporary Player</button>
+      </div>
+      <p class="hint">Select a playlist, click Test Site HLS Player, and wait for the test to finish. Play the temporary player before recording. Stop &amp; Download saves a WebM recording.</p>
+    </section>
   </div>
 
   <div class="tab-content" id="tabLogs">

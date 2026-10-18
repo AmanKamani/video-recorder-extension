@@ -709,11 +709,27 @@ testCustomPlayerButton.addEventListener("click", async () => {
       }
     });
 
+    const testResult = results?.[0]?.result ?? {};
     addLog(
       "info",
-      "Site HLS test: " +
-        JSON.stringify(results?.[0]?.result ?? {}, null, 2)
+      "Site HLS test: " + JSON.stringify(testResult, null, 2)
     );
+
+    if (testResult.manifestParsed && !testResult.fatalError && testResult.videoReadyState > 0) {
+      setRecordingStatus(
+        "Site player is ready. Play the temporary video, then start recording.",
+        "success"
+      );
+      startRecordingButton.disabled = false;
+      removeSitePlayerButton.disabled = false;
+    } else {
+      setRecordingStatus(
+        "The site-player test did not confirm playback. Check Logs before recording.",
+        "error"
+      );
+      startRecordingButton.disabled = true;
+      removeSitePlayerButton.disabled = false;
+    }
 
     setStatus(
       "Site HLS test finished. Check Logs for key and fragment results."
@@ -728,180 +744,299 @@ testCustomPlayerButton.addEventListener("click", async () => {
 /*********** APPROACH 2 OVER */
 
 
-/****** Approach 2 A - recording controls */
+/****** Recording controls: sidebar-managed WebM recording */
 
-const startRecordingButton = document.createElement("button");
-startRecordingButton.textContent = "Start Recording";
-startRecordingButton.style.margin = "8px 4px";
-startRecordingButton.style.padding = "8px";
+const recordingStatusEl = document.getElementById("recordingStatus");
+const recordingTimerEl = document.getElementById("recordingTimer");
+const startRecordingButton = document.getElementById("startRecording");
+const stopRecordingButton = document.getElementById("stopRecording");
+const removeSitePlayerButton = document.getElementById("removeSitePlayer");
 
-const stopRecordingButton = document.createElement("button");
-stopRecordingButton.textContent = "Stop Recording";
-stopRecordingButton.style.margin = "8px 4px";
-stopRecordingButton.style.padding = "8px";
-stopRecordingButton.disabled = true;
+let recordingStartedAt = null;
+let recordingTimerInterval = null;
+let lastRecordingDurationMs = 0;
 
-tabContentStreams.append(startRecordingButton, stopRecordingButton);
+function formatDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = value => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+}
 
-async function controlPageRecording(action) {
-  try {
-    const tabId = Number(tabSelect.value);
-
-    if (!Number.isInteger(tabId) || tabId <= 0) {
-      throw new Error("Select the original website tab first.");
-    }
-
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      args: [action],
-      func: async (action) => {
-        const probe = window.__hlsSidePanelProbe;
-        const video = probe?.video;
-
-        if (!video) {
-          return {
-            ok: false,
-            message:
-              "Test Site HLS Player has not created its video. Run that test first."
-          };
-        }
-
-        if (action === "start") {
-          if (probe.recording?.recorder?.state === "recording") {
-            return { ok: false, message: "Recording is already running." };
-          }
-
-          if (typeof video.captureStream !== "function") {
-            return {
-              ok: false,
-              message: "This browser does not support video.captureStream()."
-            };
-          }
-
-          if (typeof MediaRecorder === "undefined") {
-            return {
-              ok: false,
-              message: "MediaRecorder is not supported."
-            };
-          }
-
-          const stream = video.captureStream();
-          const tracks = stream.getTracks();
-
-          if (!tracks.some(track => track.kind === "video")) {
-            stream.getTracks().forEach(track => track.stop());
-            return {
-              ok: false,
-              message: "No video track is available to record."
-            };
-          }
-
-          const mimeTypes = [
-            "video/webm;codecs=vp9,opus",
-            "video/webm;codecs=vp8,opus",
-            "video/webm"
-          ];
-
-          const mimeType = mimeTypes.find(type =>
-            MediaRecorder.isTypeSupported(type)
-          );
-
-          if (!mimeType) {
-            stream.getTracks().forEach(track => track.stop());
-            return {
-              ok: false,
-              message: "No supported WebM recording format was found."
-            };
-          }
-
-          const chunks = [];
-          const recorder = new MediaRecorder(stream, { mimeType });
-
-          recorder.ondataavailable = event => {
-            if (event.data?.size > 0) chunks.push(event.data);
-          };
-
-          recorder.onerror = event => {
-            console.error("Recording error:", event.error?.message);
-          };
-
-          recorder.onstop = () => {
-            const blob = new Blob(chunks, { type: recorder.mimeType });
-            const downloadUrl = URL.createObjectURL(blob);
-            const link = document.createElement("a");
-
-            link.href = downloadUrl;
-            link.download = `hls-recording-${Date.now()}.webm`;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-
-            setTimeout(() => URL.revokeObjectURL(downloadUrl), 60000);
-            stream.getTracks().forEach(track => track.stop());
-            probe.recording = null;
-
-            console.info("Recording saved; bytes:", blob.size);
-          };
-
-          probe.recording = { recorder, chunks, stream };
-          recorder.start(1000);
-
-          return {
-            ok: true,
-            message: "Recording started.",
-            audioTracks: tracks.filter(track => track.kind === "audio").length,
-            videoTracks: tracks.filter(track => track.kind === "video").length
-          };
-        }
-
-        const recording = probe.recording;
-
-        if (!recording || recording.recorder.state !== "recording") {
-          return { ok: false, message: "There is no active recording." };
-        }
-
-        recording.recorder.stop();
-
-        return {
-          ok: true,
-          message: "Recording stopped. The browser should prepare the WebM download."
-        };
-      }
-    });
-
-    const result = results?.[0]?.result;
-
-    if (!result?.ok) {
-      throw new Error(result?.message || "The page recording failed.");
-    }
-
-    addLog("info", JSON.stringify(result));
-    setStatus(result.message);
-    return result;
-  } catch (error) {
-    setStatus(`Recording error: ${error.message}`);
-    addLog("error", error.message);
-    return null;
+function setRecordingStatus(message, state = "idle") {
+  if (recordingStatusEl) {
+    recordingStatusEl.textContent = message;
+    recordingStatusEl.dataset.state = state;
   }
 }
 
-startRecordingButton.addEventListener("click", async () => {
-  const result = await controlPageRecording("start");
+function updateRecordingTimer() {
+  if (recordingStartedAt === null) return;
+  recordingTimerEl.textContent = formatDuration(Date.now() - recordingStartedAt);
+}
 
-  if (result?.ok) {
-    startRecordingButton.disabled = true;
+function startRecordingTimer() {
+  recordingStartedAt = Date.now();
+  recordingTimerEl.textContent = "00:00";
+  clearInterval(recordingTimerInterval);
+  recordingTimerInterval = setInterval(updateRecordingTimer, 250);
+}
+
+function stopRecordingTimer() {
+  if (recordingStartedAt !== null) {
+    lastRecordingDurationMs = Date.now() - recordingStartedAt;
+  }
+  recordingStartedAt = null;
+  clearInterval(recordingTimerInterval);
+  recordingTimerInterval = null;
+  recordingTimerEl.textContent = formatDuration(lastRecordingDurationMs);
+}
+
+async function executeOnSelectedPage(action) {
+  const tab = await getSelectedTab();
+  const granted = await ensurePagePermission(tab);
+  if (!granted) throw new Error("Website access was not granted.");
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    args: [action],
+    func: async action => {
+      const probe = window.__hlsSidePanelProbe;
+      const video = probe?.video;
+
+      if (action === "cleanup") {
+        if (!probe || !video) {
+          return { ok: true, message: "No temporary player was present." };
+        }
+        if (probe.recording?.recorder?.state === "recording") {
+          return { ok: false, message: "Stop the recording before removing the player." };
+        }
+        try { probe.hls?.destroy(); } catch (_) {}
+        try { video.pause(); } catch (_) {}
+        try { video.removeAttribute("src"); video.load(); } catch (_) {}
+        video.remove();
+        try { delete window.__hlsSidePanelProbe; } catch (_) {
+          window.__hlsSidePanelProbe = null;
+        }
+        return { ok: true, message: "Temporary site player removed." };
+      }
+
+      if (!video) {
+        return {
+          ok: false,
+          message: "No temporary player found. Select a playlist and click Test Site HLS Player first."
+        };
+      }
+
+      if (action === "status") {
+        return {
+          ok: true,
+          playerPresent: !!video.isConnected,
+          recording: !!probe.recording,
+          recorderState: probe.recording?.recorder?.state ?? "inactive"
+        };
+      }
+
+      if (action === "start") {
+        if (probe.recording?.recorder?.state === "recording") {
+          return { ok: false, message: "Recording is already running." };
+        }
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.paused || video.ended) {
+          return {
+            ok: false,
+            message: "Play the temporary site player first, then start recording."
+          };
+        }
+        if (typeof video.captureStream !== "function") {
+          return { ok: false, message: "This browser does not support video.captureStream()." };
+        }
+        if (typeof MediaRecorder === "undefined") {
+          return { ok: false, message: "MediaRecorder is not supported." };
+        }
+
+        const stream = video.captureStream();
+        const tracks = stream.getTracks();
+        if (!tracks.some(track => track.kind === "video")) {
+          tracks.forEach(track => track.stop());
+          return { ok: false, message: "No video track is available to record." };
+        }
+
+        const mimeTypes = [
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
+          "video/webm"
+        ];
+        const mimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
+        if (!mimeType) {
+          tracks.forEach(track => track.stop());
+          return { ok: false, message: "No supported WebM recording format was found." };
+        }
+
+        const chunks = [];
+        const recorder = new MediaRecorder(stream, { mimeType });
+        const recording = { recorder, chunks, stream, startedAt: Date.now(), downloadStarted: false };
+
+        recorder.ondataavailable = event => {
+          if (event.data?.size > 0) chunks.push(event.data);
+        };
+        recorder.onerror = event => {
+          console.error("HLS Side Panel Pro recording error:", event.error?.message || "Unknown error");
+        };
+        recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: recorder.mimeType });
+          if (!blob.size) {
+            console.error("Recording ended but produced an empty file.");
+            tracks.forEach(track => track.stop());
+            probe.recording = null;
+            return;
+          }
+
+          const downloadUrl = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = downloadUrl;
+          link.download = `hls-recording-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+          link.style.display = "none";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+
+          setTimeout(() => URL.revokeObjectURL(downloadUrl), 60000);
+          tracks.forEach(track => track.stop());
+          recording.downloadStarted = true;
+          probe.lastRecording = {
+            bytes: blob.size,
+            mimeType: recorder.mimeType,
+            durationMs: Date.now() - recording.startedAt
+          };
+          probe.recording = null;
+          console.info("WebM recording download triggered:", blob.size, "bytes");
+        };
+
+        probe.recording = recording;
+        recorder.start(1000);
+        return {
+          ok: true,
+          message: "Recording started.",
+          mimeType,
+          audioTracks: tracks.filter(track => track.kind === "audio").length,
+          videoTracks: tracks.filter(track => track.kind === "video").length
+        };
+      }
+
+      if (action === "stop") {
+        const recording = probe.recording;
+        if (!recording || recording.recorder.state !== "recording") {
+          return { ok: false, message: "There is no active recording." };
+        }
+        recording.recorder.stop();
+        return { ok: true, message: "Recording stopped. Preparing WebM download…" };
+      }
+
+      return { ok: false, message: "Unknown recording action." };
+    }
+  });
+
+  const result = results?.[0]?.result;
+  if (!result) throw new Error("The website did not return a result.");
+  return result;
+}
+
+async function waitForDownloadFinalization(timeoutMs = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const state = await executeOnSelectedPage("status");
+      if (state.ok && !state.recording) return true;
+    } catch (_) {
+      // The user may have navigated away while the recorder was finalizing.
+      return false;
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  return false;
+}
+
+startRecordingButton.addEventListener("click", async () => {
+  startRecordingButton.disabled = true;
+  setRecordingStatus("Starting recorder…", "working");
+  try {
+    const result = await executeOnSelectedPage("start");
+    if (!result.ok) throw new Error(result.message);
+    lastRecordingDurationMs = 0;
+    startRecordingTimer();
     stopRecordingButton.disabled = false;
+    removeSitePlayerButton.disabled = true;
+    testCustomPlayerButton.disabled = true;
+    setRecordingStatus(
+      `Recording WebM · ${result.audioTracks} audio track(s), ${result.videoTracks} video track(s)`,
+      "recording"
+    );
+    addLog("info", `Recording started (${result.mimeType}; audio tracks: ${result.audioTracks}; video tracks: ${result.videoTracks}).`);
+  } catch (error) {
+    startRecordingButton.disabled = false;
+    setRecordingStatus(error.message, "error");
+    addLog("error", `Could not start recording: ${error.message}`);
   }
 });
 
 stopRecordingButton.addEventListener("click", async () => {
-  const result = await controlPageRecording("stop");
+  stopRecordingButton.disabled = true;
+  setRecordingStatus("Stopping recorder and preparing download…", "working");
+  try {
+    const result = await executeOnSelectedPage("stop");
+    if (!result.ok) throw new Error(result.message);
+    stopRecordingTimer();
+    addLog("info", result.message);
 
-  if (result?.ok) {
+    const finalized = await waitForDownloadFinalization();
     startRecordingButton.disabled = false;
-    stopRecordingButton.disabled = true;
+    removeSitePlayerButton.disabled = false;
+    testCustomPlayerButton.disabled = false;
+    setRecordingStatus(
+      finalized
+        ? `WebM download triggered · duration ${formatDuration(lastRecordingDurationMs)}`
+        : `Recorder stopped · duration ${formatDuration(lastRecordingDurationMs)}. Check Chrome downloads.`,
+      finalized ? "success" : "working"
+    );
+    if (finalized) addLog("info", "Recorder finalized and the WebM download was triggered.");
+  } catch (error) {
+    stopRecordingTimer();
+    startRecordingButton.disabled = false;
+    removeSitePlayerButton.disabled = false;
+    testCustomPlayerButton.disabled = false;
+    setRecordingStatus(error.message, "error");
+    addLog("error", `Could not stop recording cleanly: ${error.message}`);
   }
 });
 
-/** Approach 2 A - OVER */
+removeSitePlayerButton.addEventListener("click", async () => {
+  removeSitePlayerButton.disabled = true;
+  setRecordingStatus("Removing temporary player…", "working");
+  try {
+    const result = await executeOnSelectedPage("cleanup");
+    if (!result.ok) throw new Error(result.message);
+    setRecordingStatus(result.message, "idle");
+    startRecordingButton.disabled = true;
+    stopRecordingButton.disabled = true;
+    testCustomPlayerButton.disabled = false;
+    addLog("info", result.message);
+  } catch (error) {
+    setRecordingStatus(error.message, "error");
+    addLog("error", `Could not remove temporary player: ${error.message}`);
+    removeSitePlayerButton.disabled = false;
+  }
+});
+
+// A newly created diagnostic player becomes available after the test finishes.
+// Keep controls safe if the extension panel is closed/reopened during a recording.
+setRecordingStatus("Run Test Site HLS Player and start playback first.", "idle");
+startRecordingButton.disabled = true;
+stopRecordingButton.disabled = true;
+removeSitePlayerButton.disabled = true;
+
+/** Recording controls end */
