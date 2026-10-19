@@ -128,40 +128,6 @@
     }
 
     /* Logs area */
-    .logs-toolbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-
-    .logs-toolbar-title { font-size: 12px; color: #d1d5db; }
-
-    .icon-button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 32px;
-      height: 30px;
-      padding: 0;
-      background: #374151;
-      color: #f9fafb;
-      border: 1px solid #4b5563;
-      border-radius: 5px;
-      cursor: pointer;
-    }
-
-    .icon-button:hover { background: #4b5563; }
-    .icon-button:disabled { opacity: .55; cursor: default; }
-
-    #copyLogsStatus {
-      min-height: 14px;
-      margin: 4px 0 0;
-      font-size: 11px;
-      color: #9ca3af;
-    }
-
     #logsArea {
       height: 150px;
       overflow-y: auto;
@@ -255,6 +221,7 @@
 
     .recording-actions button { margin: 0; }
     #stopRecording { background: #b91c1c; }
+    #injectSitePlayer { grid-column: 1 / -1; background: #0f766e; }
     #removeSitePlayer { grid-column: 1 / -1; background: #374151; }
 
   </style>
@@ -297,30 +264,22 @@
     <section class="recording-panel" aria-label="WebM recorder">
       <h3>WebM Recorder</h3>
       <div id="recordingStatus" role="status" aria-live="polite" data-state="idle">
-        Run Test Site HLS Player and start playback first.
+        Inject the player and start playback first. Choose a file before each recording.
       </div>
       <div id="recordingTimer" aria-label="Recording duration">00:00</div>
       <div class="recording-actions">
-        <button id="startRecording" disabled>Start Recording</button>
+        <button id="injectSitePlayer">Inject Player</button>
+        <button id="startRecording" disabled>Start Recording (Choose File)</button>
         <button id="stopRecording" disabled>Stop &amp; Download</button>
-        <button id="removeSitePlayer" disabled>Remove Temporary Player</button>
+        <button id="removeSitePlayer" disabled>Remove Player</button>
       </div>
-      <p class="hint">Select a playlist, click Test Site HLS Player, and wait for the test to finish. Play the temporary player before recording. Stop &amp; Download saves a WebM recording.</p>
+      <p class="hint">For each website tab: select its playlist, click Inject Player, play the temporary video, then start recording. You can switch tabs and start other recordings; existing recordings continue independently. Each recording writes WebM chunks directly to the file you choose, reducing memory use for long videos. The file is finalized when you stop recording or the video ends. Keep this side panel open while recording; Chrome must remain running.</p>
     </section>
   </div>
 
   <div class="tab-content" id="tabLogs">
-    <div class="logs-toolbar">
-      <div class="logs-toolbar-title">Extension operation logs:</div>
-      <button id="copyLogsBtn" class="icon-button" type="button" title="Copy all logs" aria-label="Copy all logs">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="8" y="8" width="13" height="13" rx="2"></rect>
-          <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path>
-        </svg>
-      </button>
-    </div>
+    <div>Extension operation logs:</div>
     <div id="logsArea">--- Logs not available until extension initializes ---</div>
-    <div id="copyLogsStatus" role="status" aria-live="polite"></div>
   </div>
 
   <video id="video" controls playsinline></video>

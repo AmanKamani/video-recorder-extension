@@ -16,6 +16,9 @@ const tabContentLogs = document.getElementById("tabLogs");
 let hls = null;
 let scanId = 0;
 let selectedButton = null;
+let selectedPlaylistTabId = null;
+let tabRefreshGeneration = 0;
+let followActiveTab = true;
 
 // Logging system
 let logEntries = [];
@@ -69,10 +72,13 @@ function isM3u8(value) {
   }
 }
 
-async function refreshTabs() {
+async function refreshTabs(preferredTabId = null) {
+  const refreshGeneration = ++tabRefreshGeneration;
+  const previousId = tabSelect.value;
   try {
-    const previousId = tabSelect.value;
     const tabs = await chrome.tabs.query({});
+    // A slower, older refresh must never overwrite a newer tab-switch result.
+    if (refreshGeneration !== tabRefreshGeneration) return;
 
     const websiteTabs = tabs.filter(tab => isHttpUrl(tab.url));
 
@@ -83,46 +89,61 @@ async function refreshTabs() {
       option.value = "";
       option.textContent = "No website tabs found";
       tabSelect.appendChild(option);
+      selectedButton = null;
+      selectedPlaylistTabId = null;
+      streamsEl.replaceChildren();
       setStatus("Open your website in a normal browser tab.");
+      await syncRecorderControls();
       return;
     }
 
     for (const tab of websiteTabs) {
       const option = document.createElement("option");
-
       option.value = String(tab.id);
 
       const title = tab.title || tab.url;
-
-      option.textContent =
-        `${tab.active ? "● " : ""}${title.slice(0, 70)}`;
-
-      option.title = tab.url;
-
+      let shortUrl = tab.url || "";
+      try {
+        const parsedUrl = new URL(tab.url);
+        shortUrl = `${parsedUrl.hostname}${parsedUrl.pathname}`;
+      } catch (_) {}
+      shortUrl = shortUrl.slice(0, 58);
+      option.textContent = `${tab.active ? "● " : ""}[Tab ${tab.id}] ${title.slice(0, 44)} — ${shortUrl}`;
+      option.title = `Tab ID: ${tab.id}\n${tab.title || "Untitled tab"}\n${tab.url || ""}`;
       tabSelect.appendChild(option);
     }
 
-    const previousTabExists = websiteTabs.some(
-      tab => String(tab.id) === previousId
-    );
-
-    if (previousTabExists) {
+    const exists = id => id !== null && websiteTabs.some(tab => String(tab.id) === String(id));
+    const activeTab = websiteTabs.find(tab => tab.active);
+    if (exists(preferredTabId)) {
+      tabSelect.value = String(preferredTabId);
+    } else if (followActiveTab && activeTab) {
+      tabSelect.value = String(activeTab.id);
+    } else if (exists(previousId)) {
       tabSelect.value = previousId;
+    } else if (activeTab) {
+      tabSelect.value = String(activeTab.id);
     } else {
-      const activeTab = websiteTabs.find(tab => tab.active);
-
-      if (activeTab) {
-        tabSelect.value = String(activeTab.id);
-      } else {
-        tabSelect.value = String(websiteTabs[0].id);
-      }
+      tabSelect.value = String(websiteTabs[0].id);
     }
 
-    setStatus(
-      "Choose the website tab you want to scan, then click Scan."
-    );
+    // Programmatic .value changes do not fire a change event. Clear all scan
+    // results explicitly whenever the selected tab identity changes.
+    if (previousId !== tabSelect.value) {
+      ++scanId; // invalidate any scan that is still in flight
+      selectedButton = null;
+      selectedPlaylistTabId = null;
+      streamsEl.replaceChildren();
+    }
+
+    if (previousId !== tabSelect.value || preferredTabId !== null) {
+      setStatus(`Selected Tab ${tabSelect.value}. Scan this tab to discover its playlists.`);
+    }
+    await syncRecorderControls();
   } catch (error) {
-    setStatus(`Unable to list tabs: ${error.message}`);
+    if (refreshGeneration === tabRefreshGeneration) {
+      setStatus(`Unable to list tabs: ${error.message}`);
+    }
   }
 }
 
@@ -169,40 +190,6 @@ clearLogsBtn.addEventListener("click", () => {
 });
 document.getElementById("tabLogs").appendChild(clearLogsBtn);
 
-// Copy all current log entries as plain text for easy sharing.
-const copyLogsBtn = document.getElementById("copyLogsBtn");
-const copyLogsStatus = document.getElementById("copyLogsStatus");
-if (copyLogsBtn) {
-  copyLogsBtn.addEventListener("click", async () => {
-    const text = logEntries.length
-      ? logEntries.map(({ timestamp, level, message }) =>
-          `[${timestamp}] ${String(message).replace(/\s+$/, "")}`
-        ).join("\n")
-      : (logsArea.innerText || "No logs available.");
-
-    try {
-      await navigator.clipboard.writeText(text);
-      if (copyLogsStatus) copyLogsStatus.textContent = `Copied ${logEntries.length} log entries to clipboard.`;
-    } catch (error) {
-      // Fallback for contexts where Clipboard API is unavailable.
-      try {
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        const copied = document.execCommand("copy");
-        textarea.remove();
-        if (!copied) throw new Error("Copy command was rejected");
-        if (copyLogsStatus) copyLogsStatus.textContent = `Copied ${logEntries.length} log entries to clipboard.`;
-      } catch (fallbackError) {
-        if (copyLogsStatus) copyLogsStatus.textContent = "Copy failed. Please select and copy the logs manually.";
-      }
-    }
-  });
-}
-
 async function getSelectedTab() {
   const tabId = Number(tabSelect.value);
 
@@ -247,6 +234,7 @@ async function scanSelectedTab() {
   scanButton.disabled = true;
   streamsEl.replaceChildren();
   selectedButton = null;
+  selectedPlaylistTabId = null;
 
   try {
     const tab = await getSelectedTab();
@@ -269,29 +257,35 @@ async function scanSelectedTab() {
       },
 
       func: () => {
-        const resources =
-          performance.getEntriesByType("resource");
-
-        const urls = resources
-          .map(resource => resource.name)
-          .filter(name => {
-            try {
-              const url = new URL(name);
-
-              return (
-                ["http:", "https:"].includes(url.protocol) &&
-                url.pathname.toLowerCase().endsWith(".m3u8")
-              );
-            } catch {
-              return false;
+        // Resource Timing is page-local, but it can contain old playlists when
+        // a course SPA changes videos without navigating. Keep the most recent
+        // occurrence of each URL and return newest-first so the current stream
+        // is not buried below historical playlist requests.
+        const latestByUrl = new Map();
+        for (const resource of performance.getEntriesByType("resource")) {
+          const name = resource.name;
+          try {
+            const url = new URL(name);
+            if (!["http:", "https:"].includes(url.protocol) ||
+                !url.pathname.toLowerCase().endsWith(".m3u8")) continue;
+            const previous = latestByUrl.get(name);
+            if (!previous || resource.startTime >= previous.lastSeen) {
+              latestByUrl.set(name, { url: name, lastSeen: resource.startTime });
             }
-          });
-
-        return [...new Set(urls)];
+          } catch (_) {}
+        }
+        return [...latestByUrl.values()]
+          .sort((a, b) => b.lastSeen - a.lastSeen)
+          .slice(0, 60)
+          .map(item => item.url);
       }
     });
 
     if (currentScan !== scanId) {
+      return;
+    }
+    if (Number(tabSelect.value) !== tab.id) {
+      setStatus(`Scan discarded because the selected tab changed. Scan Tab ${tabSelect.value} again.`);
       return;
     }
 
@@ -314,7 +308,9 @@ async function scanSelectedTab() {
 
       button.className = "stream";
       button.textContent = url;
-      button.title = "Play this playlist";
+      button.dataset.playlistUrl = url;
+      button.dataset.tabId = String(tab.id);
+      button.title = `Playlist from Tab ${tab.id}; newest resource requests are listed first`;
 
       button.addEventListener("click", () => {
         if (selectedButton) {
@@ -322,8 +318,9 @@ async function scanSelectedTab() {
         }
 
         selectedButton = button;
+        selectedPlaylistTabId = tab.id;
         button.classList.add("selected");
-        setStatus("Playlist selected. Use Analyze Selected HLS or Test Site HLS Player.");
+        setStatus("Playlist selected for this tab. Use Analyze Selected HLS or WebM Recorder > Inject Player.");
       });
 
       streamsEl.appendChild(button);
@@ -631,76 +628,31 @@ inspectPlayerButton.addEventListener("click", async () => {
 
 /*********** APPROACH 2 START - create video player inside the website and play the video there */
 
-const testCustomPlayerButton = document.createElement("button");
-testCustomPlayerButton.textContent = "Test Site HLS Player";
-scanButton.insertAdjacentElement("afterend", testCustomPlayerButton);
-
-const readLiveProbeButton = document.createElement("button");
-readLiveProbeButton.textContent = "Read Live Probe";
-readLiveProbeButton.title = "Read diagnostics from the existing temporary player without recreating it";
-testCustomPlayerButton.insertAdjacentElement("afterend", readLiveProbeButton);
-
-readLiveProbeButton.addEventListener("click", async () => {
-  readLiveProbeButton.disabled = true;
-  try {
-    const tab = await getSelectedTab();
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      world: "MAIN",
-      func: () => {
-        const probe = window.__hlsSidePanelProbe;
-        const video = probe?.video;
-        const state = probe?.state;
-        if (!probe || !state) return { exists: false, message: "No diagnostic player exists. Click Test Site HLS Player first." };
-        return {
-          exists: true,
-          video: video ? {
-            paused: video.paused,
-            currentTime: video.currentTime,
-            readyState: video.readyState,
-            networkState: video.networkState,
-            error: video.error?.message ?? null
-          } : null,
-          manifestParsed: state.manifestParsed,
-          keyLoaded: state.keyLoaded,
-          fragmentParsed: state.fragmentParsed,
-          fatalError: state.fatalError,
-          decryptionProbe: state.decryptionProbe,
-          decryptedEventConstant: state.decryptedEventConstant,
-          parsingProbe: state.parsingProbe ?? null,
-          fragmentLoadProbe: state.fragmentLoadProbe ?? null,
-          lastErrorDiagnostic: state.lastErrorDiagnostic ?? null,
-          availableEventConstants: state.availableEventConstants ?? {},
-          eventCounts: state.eventCounts ?? {},
-          videoEvents: state.videoEvents ?? [],
-          recentHlsEvents: (state.events ?? []).slice(-20)
-        };
-      }
-    });
-    addLog("info", "Live site-player probe: " + JSON.stringify(results?.[0]?.result ?? {}, null, 2));
-    setStatus("Live probe captured. The existing temporary player was not recreated.");
-  } catch (error) {
-    addLog("error", `Could not read live probe: ${error.message || error}`);
-    setStatus(`Could not read live probe: ${error.message || error}`);
-  } finally {
-    readLiveProbeButton.disabled = false;
-  }
-});
+const testCustomPlayerButton = document.getElementById("injectSitePlayer");
+testCustomPlayerButton.textContent = "Inject Player";
 
 testCustomPlayerButton.addEventListener("click", async () => {
-  const playlistUrl = selectedButton?.textContent?.trim();
+  const targetTabId = Number(tabSelect.value);
+  const playlistUrl = selectedButton?.dataset?.playlistUrl || selectedButton?.textContent?.trim();
 
-  if (!playlistUrl || !isM3u8(playlistUrl)) {
-    setStatus("First scan and select an HLS playlist.");
+  if (!playlistUrl || !isM3u8(playlistUrl) || selectedPlaylistTabId !== targetTabId ||
+      selectedButton?.dataset?.tabId !== String(targetTabId)) {
+    setStatus("Scan this tab and select one of its HLS playlists before injecting a player.");
     return;
   }
 
   testCustomPlayerButton.disabled = true;
 
   try {
-    const tab = await getSelectedTab();
+    const tab = await chrome.tabs.get(targetTabId);
+    if (Number(tabSelect.value) !== targetTabId) {
+      throw new Error("The selected tab changed. Select its playlist and try injecting again.");
+    }
+    const pagePermission = await ensurePagePermission(tab);
+    if (!pagePermission) throw new Error("Website access was not granted.");
+    await installNotificationBridge(tab.id);
 
-    setStatus("Testing the site's HLS player on the page...");
+    setStatus(`Injecting the selected playlist into Tab ${tab.id}...`);
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -716,15 +668,7 @@ testCustomPlayerButton.addEventListener("click", async () => {
           fatalError: null,
           manifestParsed: false,
           keyLoaded: false,
-          fragmentParsed: false,
-          decryptionProbe: {
-            eventSeen: false,
-            byteLength: null,
-            valueType: null
-          },
-          parsingProbe: { count: 0, last: null },
-          fragmentLoadProbe: { count: 0, last: null },
-          eventCounts: {}
+          fragmentParsed: false
         };
 
         window.__hlsSidePanelProbe = { state, hls: null, video: null };
@@ -741,17 +685,6 @@ testCustomPlayerButton.addEventListener("click", async () => {
         document.body.appendChild(video);
 
         const H = window.Hls;
-        state.decryptedEventConstant = H?.Events?.FRAG_DECRYPTED ?? null;
-        state.availableEventConstants = H?.Events
-          ? Object.fromEntries(Object.entries(H.Events).filter(([key]) => /FRAG|KEY|BUFFER|PARS|DECRYPT|MANIFEST/i.test(key)))
-          : {};
-        state.videoEvents = [];
-        for (const eventName of ["play", "playing", "pause", "canplay", "waiting", "error"]) {
-          video.addEventListener(eventName, () => {
-            state.videoEvents.push({ event: eventName, currentTime: video.currentTime, readyState: video.readyState });
-            if (state.videoEvents.length > 20) state.videoEvents.shift();
-          });
-        }
 
         if (typeof H !== "function" || !H.isSupported()) {
           state.fatalError = "Page HLS constructor unavailable or unsupported.";
@@ -763,33 +696,12 @@ testCustomPlayerButton.addEventListener("click", async () => {
         window.__hlsSidePanelProbe.video = video;
 
         const record = (name, data) => {
-          state.eventCounts[name] = (state.eventCounts[name] ?? 0) + 1;
           state.events.push({
             name,
             details: data?.details ?? null,
             fatal: data?.fatal ?? false
           });
-          if (state.events.length > 40) state.events.shift();
-        };
-
-        // Metadata-only inspection. Never construct a view over HLS buffers:
-        // customized builds may transfer/detach those buffers immediately.
-        const byteInfo = value => {
-          try {
-            if (value == null) return { byteLength: null, valueType: String(value) };
-            let type = typeof value;
-            try { type = value.constructor?.name ?? type; } catch (_) {}
-            let byteLength = null;
-            try {
-              if (typeof value.byteLength === "number") byteLength = value.byteLength;
-              else if (typeof value.length === "number") byteLength = value.length;
-            } catch (error) {
-              return { byteLength: null, valueType: type, accessError: String(error?.message ?? error) };
-            }
-            return { byteLength, valueType: type };
-          } catch (error) {
-            return { byteLength: null, valueType: "unavailable", accessError: String(error?.message ?? error) };
-          }
+          if (state.events.length > 30) state.events.shift();
         };
 
         hls.on(H.Events.MANIFEST_PARSED, (_, data) => {
@@ -804,113 +716,15 @@ testCustomPlayerButton.addEventListener("click", async () => {
           });
         });
 
-        hls.on(H.Events.FRAG_DECRYPTED, (_, data) => {
-          const payload = (() => { try { return data?.payload; } catch (error) { return { __readError: String(error?.message ?? error) }; } })();
-          const info = payload?.__readError
-            ? { eventSeen: true, byteLength: null, payloadType: "unavailable", accessError: payload.__readError }
-            : { eventSeen: true, ...byteInfo(payload) };
-          state.decryptionProbe = info;
-          record("FRAG_DECRYPTED", {
-            details: info.accessError ? "event fired; payload metadata inaccessible" : `event fired; payload type=${info.valueType ?? "unknown"}, bytes=${info.byteLength ?? "?"}`
-          });
-        });
-
-        if (H.Events.FRAG_PARSING_DATA) {
-          hls.on(H.Events.FRAG_PARSING_DATA, (_, data) => {
-            state.parsingProbe.count += 1;
-            state.parsingProbe.last = {
-              type: data?.type ?? null,
-              startPTS: Number.isFinite(data?.startPTS) ? data.startPTS : null,
-              endPTS: Number.isFinite(data?.endPTS) ? data.endPTS : null,
-              data1: byteInfo(data?.data1),
-              data2: byteInfo(data?.data2)
-            };
-            record("FRAG_PARSING_DATA", {
-              details: `${data?.type ?? "unknown"}: data1=${state.parsingProbe.last.data1.byteLength ?? "?"} bytes, data2=${state.parsingProbe.last.data2.byteLength ?? "?"} bytes`
-            });
-          });
-        }
-
-        if (H.Events.FRAG_BUFFERED) {
-          hls.on(H.Events.FRAG_BUFFERED, (_, data) => {
-            record("FRAG_BUFFERED", data);
-          });
-        }
-
-        // Keep this listener deliberately defensive: some customized HLS builds
-        // expose getters that can throw while an event is being dispatched.
-        const safeRead = (obj, key) => {
-          try { return obj == null ? undefined : obj[key]; }
-          catch (error) { return { __probeReadError: String(error?.message ?? error) }; }
-        };
-        const safeKeys = obj => {
-          try { return obj && typeof obj === "object" ? Object.keys(obj).slice(0, 20) : []; }
-          catch (error) { return [`<keys error: ${String(error?.message ?? error)}>`]; }
-        };
-        const safeSummary = value => {
-          if (value && value.__probeReadError) return { accessError: value.__probeReadError };
-          return byteInfo(value);
-        };
-
-        if (H.Events.FRAG_LOADED) {
-          hls.on(H.Events.FRAG_LOADED, (_, data) => {
-            try {
-              const frag = safeRead(data, "frag");
-              const fragType = safeRead(frag, "type");
-              const fragUrl = safeRead(frag, "url");
-              const eventData = safeRead(data, "data");
-              const payload = safeRead(data, "payload");
-              const stats = safeRead(data, "stats");
-              state.fragmentLoadProbe.count += 1;
-              state.fragmentLoadProbe.last = {
-                type: typeof fragType === "string" ? fragType : null,
-                urlPresent: typeof fragUrl === "string" && fragUrl.length > 0,
-                dataKeys: safeKeys(data),
-                fragKeys: safeKeys(frag),
-                // Never inspect frag.data or construct views over buffers in this customized HLS build.
-                fragData: { notRead: true },
-                eventData: safeSummary(eventData),
-                payload: safeSummary(payload),
-                stats: stats && !stats.__probeReadError ? {
-                  loaded: safeRead(stats, "loaded") ?? null,
-                  total: safeRead(stats, "total") ?? null,
-                  chunkCount: safeRead(stats, "chunkCount") ?? null
-                } : null
-              };
-              record("FRAG_LOADED", {
-                details: `loaded ${state.fragmentLoadProbe.last.type ?? "unknown"} fragment; metadata captured safely`
-              });
-            } catch (error) {
-              state.fragmentLoadProbe.listenerError = String(error?.message ?? error);
-            }
-          });
-        }
-
         hls.on(H.Events.FRAG_PARSED, (_, data) => {
           state.fragmentParsed = true;
           record("FRAG_PARSED", data);
         });
 
         hls.on(H.Events.ERROR, (_, data) => {
-          const details = safeRead(data, "details");
-          const errorObj = safeRead(data, "error");
-          const errorName = safeRead(errorObj, "name");
-          const errorMessage = safeRead(errorObj, "message");
-          const fatal = safeRead(data, "fatal");
-          record("ERROR", {
-            details: typeof details === "string" ? details : null,
-            fatal: fatal === true
-          });
-          state.lastErrorDiagnostic = {
-            details: typeof details === "string" ? details : null,
-            type: safeRead(data, "type") ?? null,
-            fatal: fatal === true,
-            errorName: typeof errorName === "string" ? errorName : null,
-            errorMessage: typeof errorMessage === "string" ? errorMessage : null,
-            dataKeys: safeKeys(data)
-          };
-          if (fatal === true) {
-            state.fatalError = (typeof details === "string" && details) || "Fatal HLS error";
+          record("ERROR", data);
+          if (data?.fatal) {
+            state.fatalError = data.details || data.type || "Fatal HLS error";
           }
         });
 
@@ -924,12 +738,6 @@ testCustomPlayerButton.addEventListener("click", async () => {
           manifestParsed: state.manifestParsed,
           keyLoaded: state.keyLoaded,
           fragmentParsed: state.fragmentParsed,
-          decryptionProbe: state.decryptionProbe,
-          parsingProbe: state.parsingProbe,
-          fragmentLoadProbe: state.fragmentLoadProbe,
-          lastErrorDiagnostic: state.lastErrorDiagnostic ?? null,
-          availableEventConstants: state.availableEventConstants,
-          eventCounts: state.eventCounts,
           fatalError: state.fatalError,
           events: state.events,
           videoReadyState: video.readyState,
@@ -944,36 +752,22 @@ testCustomPlayerButton.addEventListener("click", async () => {
       "Site HLS test: " + JSON.stringify(testResult, null, 2)
     );
 
-    if (testResult.decryptionProbe?.eventSeen) {
-      addLog(
-        "info",
-        "Decrypted fragment probe: " + JSON.stringify(testResult.decryptionProbe, null, 2)
-      );
-    } else {
-      addLog(
-        "warning",
-        "No FRAG_DECRYPTED payload observed in the initial snapshot. Do not rerun Test Site HLS Player yet (it recreates the player). Press Play on the existing temporary player, then click Read Live Probe."
-      );
-    }
-
     if (testResult.manifestParsed && !testResult.fatalError && testResult.videoReadyState > 0) {
       setRecordingStatus(
-        "Site player is ready. Play the temporary video, then start recording.",
+        "Player injected. Press Play on this tab, then start recording. You can repeat this on other tabs.",
         "success"
       );
-      startRecordingButton.disabled = false;
-      removeSitePlayerButton.disabled = false;
+      await syncRecorderControls();
     } else {
       setRecordingStatus(
-        "The site-player test did not confirm playback. Check Logs before recording.",
+        "Player injection did not confirm readiness. Check Logs and the page player.",
         "error"
       );
-      startRecordingButton.disabled = true;
-      removeSitePlayerButton.disabled = false;
+      await syncRecorderControls();
     }
 
     setStatus(
-      "Site HLS test finished. Check Logs for key and fragment results."
+      "Player injection finished for the selected tab. Select another tab to set up another recording."
     );
   } catch (error) {
     setStatus(`Site HLS test failed: ${error.message || error}`);
@@ -993,9 +787,84 @@ const startRecordingButton = document.getElementById("startRecording");
 const stopRecordingButton = document.getElementById("stopRecording");
 const removeSitePlayerButton = document.getElementById("removeSitePlayer");
 
+// Bridge chunk data from the page's MAIN world to the extension side panel.
+// The queue preserves chunk order and waits for each disk write acknowledgement.
+async function installNotificationBridge(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: () => {
+      if (window.__hlsSidePanelFileBridgeInstalledV1) return;
+      window.__hlsSidePanelFileBridgeInstalledV1 = true;
+      let bridgeQueue = Promise.resolve();
+
+      const toBase64 = bytes => {
+        let binary = "";
+        const step = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += step) {
+          binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + step, bytes.length)));
+        }
+        return btoa(binary);
+      };
+
+      window.addEventListener("message", event => {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (!data || data.channel !== "hls-side-panel-file-recorder-v1" || data.type !== "chunk") return;
+        if (!(data.blob instanceof Blob) || !data.sessionId) return;
+
+        bridgeQueue = bridgeQueue.then(async () => {
+          const bytes = new Uint8Array(await data.blob.arrayBuffer());
+          const acknowledgement = await chrome.runtime.sendMessage({
+            type: "HLS_SIDEPANEL_RECORDING_CHUNK",
+            sessionId: data.sessionId,
+            sequence: data.sequence,
+            base64: toBase64(bytes)
+          });
+          if (!acknowledgement?.ok) {
+            throw new Error(acknowledgement?.message || "The recording chunk could not be written to disk.");
+          }
+        }).catch(error => {
+          console.error("HLS Side Panel Pro chunk bridge failed:", error?.message || error);
+        });
+      });
+
+      // This distinct event avoids duplicate completion handling by an older bridge
+      // that may still be installed in an already-open course tab.
+      window.addEventListener("hls-side-panel-recording-stream-finished", event => {
+        let detail = {};
+        try { detail = JSON.parse(String(event.detail || "{}")); } catch (_) {}
+        bridgeQueue = bridgeQueue.then(async () => {
+          await chrome.runtime.sendMessage({
+            type: "HLS_SIDEPANEL_RECORDING_FINISHED",
+            detail
+          });
+        }).catch(error => {
+          console.error("HLS Side Panel Pro completion bridge failed:", error?.message || error);
+        });
+      });
+
+      // Keep the legacy in-memory recorder's completion path working.
+      if (!window.__hlsSidePanelNotificationBridgeInstalled) {
+        window.__hlsSidePanelNotificationBridgeInstalled = true;
+        window.addEventListener("hls-side-panel-recording-finished", event => {
+          let detail = {};
+          try { detail = JSON.parse(String(event.detail || "{}")); } catch (_) {}
+          chrome.runtime.sendMessage({
+            type: "HLS_SIDEPANEL_RECORDING_FINISHED",
+            detail
+          }).catch(() => {});
+        });
+      }
+    }
+  });
+}
+
+let recorderUiBusy = false;
 let recordingStartedAt = null;
 let recordingTimerInterval = null;
 let lastRecordingDurationMs = 0;
+const fileRecordingSessions = new Map();
 
 function formatDuration(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -1037,18 +906,39 @@ function stopRecordingTimer() {
   recordingTimerEl.textContent = formatDuration(lastRecordingDurationMs);
 }
 
-async function executeOnSelectedPage(action) {
-  const tab = await getSelectedTab();
+async function executeOnSelectedPage(action, explicitTabId = null, actionOptions = {}) {
+  const tab = explicitTabId ? await chrome.tabs.get(explicitTabId) : await getSelectedTab();
   const granted = await ensurePagePermission(tab);
   if (!granted) throw new Error("Website access was not granted.");
+  await installNotificationBridge(tab.id);
 
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     world: "MAIN",
-    args: [action],
-    func: async action => {
+    args: [action, actionOptions],
+    func: async (action, actionOptions = {}) => {
       const probe = window.__hlsSidePanelProbe;
       const video = probe?.video;
+
+      // Warn before this tab unloads while its MediaRecorder is active.
+      // The listener lives in the page's MAIN world and is scoped to this tab.
+      const refreshGuardKey = "__hlsSidePanelRecordingGuardV1";
+      const enableRecordingGuard = () => {
+        if (window[refreshGuardKey]?.active) return;
+        const handler = event => {
+          event.preventDefault();
+          event.returnValue = "";
+          return "";
+        };
+        window.addEventListener("beforeunload", handler);
+        window[refreshGuardKey] = { active: true, handler };
+      };
+      const disableRecordingGuard = () => {
+        const guard = window[refreshGuardKey];
+        if (!guard) return;
+        try { window.removeEventListener("beforeunload", guard.handler); } catch (_) {}
+        try { delete window[refreshGuardKey]; } catch (_) { window[refreshGuardKey] = null; }
+      };
 
       if (action === "cleanup") {
         if (!probe || !video) {
@@ -1067,19 +957,26 @@ async function executeOnSelectedPage(action) {
         return { ok: true, message: "Temporary site player removed." };
       }
 
-      if (!video) {
+      // Status must work even after cleanup removed the player/global probe.
+      // This lets the side panel clear stale success UI and re-enable Inject.
+      if (action === "status") {
+        const playerPresent = !!video?.isConnected;
         return {
-          ok: false,
-          message: "No temporary player found. Select a playlist and click Test Site HLS Player first."
+          ok: true,
+          playerPresent,
+          recording: playerPresent && !!probe?.recording,
+          recorderState: playerPresent ? (probe?.recording?.recorder?.state ?? "inactive") : "inactive",
+          startedAt: playerPresent ? (probe?.recording?.startedAt ?? null) : null,
+          lastRecording: playerPresent ? (probe?.lastRecording ?? null) : null,
+          videoEnded: playerPresent && !!video?.ended,
+          videoPaused: playerPresent ? (video?.paused ?? true) : true
         };
       }
 
-      if (action === "status") {
+      if (!video) {
         return {
-          ok: true,
-          playerPresent: !!video.isConnected,
-          recording: !!probe.recording,
-          recorderState: probe.recording?.recorder?.state ?? "inactive"
+          ok: false,
+          message: "No temporary player found. Select a playlist and click Inject Player first."
         };
       }
 
@@ -1100,6 +997,12 @@ async function executeOnSelectedPage(action) {
           return { ok: false, message: "MediaRecorder is not supported." };
         }
 
+        const storageMode = actionOptions.storageMode || "file";
+        const sessionId = actionOptions.sessionId || null;
+        if (storageMode === "file" && !sessionId) {
+          return { ok: false, message: "Missing direct-to-file recording session." };
+        }
+
         const stream = video.captureStream();
         const tracks = stream.getTracks();
         if (!tracks.some(track => track.kind === "video")) {
@@ -1118,52 +1021,130 @@ async function executeOnSelectedPage(action) {
           return { ok: false, message: "No supported WebM recording format was found." };
         }
 
-        const chunks = [];
+        const chunks = storageMode === "memory" ? [] : null;
         const recorder = new MediaRecorder(stream, { mimeType });
-        const recording = { recorder, chunks, stream, startedAt: Date.now(), downloadStarted: false };
+        const recording = {
+          recorder, chunks, stream, startedAt: Date.now(), downloadStarted: false,
+          stopReason: "manual", autoStopHandler: null, storageMode, sessionId,
+          filename: actionOptions.filename || null, chunkSequence: 0
+        };
 
         recorder.ondataavailable = event => {
-          if (event.data?.size > 0) chunks.push(event.data);
+          if (!event.data || event.data.size === 0) return;
+          if (recording.storageMode === "file") {
+            // Blob is structured-cloned to the isolated-world bridge; no full-recording
+            // chunk array or large final Blob is created in the page.
+            window.postMessage({
+              channel: "hls-side-panel-file-recorder-v1",
+              type: "chunk",
+              sessionId: recording.sessionId,
+              sequence: recording.chunkSequence++,
+              blob: event.data
+            }, "*");
+          } else {
+            recording.chunks.push(event.data);
+          }
         };
         recorder.onerror = event => {
           console.error("HLS Side Panel Pro recording error:", event.error?.message || "Unknown error");
         };
         recorder.onstop = () => {
-          const blob = new Blob(chunks, { type: recorder.mimeType });
-          if (!blob.size) {
-            console.error("Recording ended but produced an empty file.");
-            tracks.forEach(track => track.stop());
+          // Recording has stopped; normal navigation is allowed again.
+          disableRecordingGuard();
+          if (recording.autoStopHandler) {
+            video.removeEventListener("ended", recording.autoStopHandler);
+          }
+          tracks.forEach(track => track.stop());
+          const durationMs = Date.now() - recording.startedAt;
+          const finishedAt = Date.now();
+
+          if (recording.storageMode === "file") {
+            probe.lastRecording = {
+              bytes: null,
+              mimeType: recorder.mimeType,
+              durationMs,
+              finishedAt,
+              reason: recording.stopReason,
+              filename: recording.filename,
+              streamedToFile: true
+            };
             probe.recording = null;
+            window.dispatchEvent(new CustomEvent("hls-side-panel-recording-stream-finished", {
+              detail: JSON.stringify({
+                ok: true,
+                reason: recording.stopReason,
+                durationMs,
+                filename: recording.filename,
+                sessionId: recording.sessionId,
+                pageTitle: document.title || location.hostname,
+                streamedToFile: true
+              })
+            }));
+            console.info("WebM recording chunks streamed to the selected file:", recording.filename);
             return;
           }
 
+          const blob = new Blob(recording.chunks, { type: recorder.mimeType });
+          if (!blob.size) {
+            console.error("Recording ended but produced an empty file.");
+            probe.recording = null;
+            window.dispatchEvent(new CustomEvent("hls-side-panel-recording-finished", {
+              detail: JSON.stringify({ ok: false, reason: recording.stopReason, message: "Recording produced an empty file." })
+            }));
+            return;
+          }
+
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          const safeTabTitle = (document.title || "video").replace(/[^a-z0-9-_ ]/gi, "").trim().slice(0, 60) || "video";
           const downloadUrl = URL.createObjectURL(blob);
           const link = document.createElement("a");
           link.href = downloadUrl;
-          link.download = `hls-recording-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+          link.download = `${safeTabTitle}-recording-${stamp}.webm`;
           link.style.display = "none";
           document.body.appendChild(link);
           link.click();
           link.remove();
-
           setTimeout(() => URL.revokeObjectURL(downloadUrl), 60000);
-          tracks.forEach(track => track.stop());
           recording.downloadStarted = true;
           probe.lastRecording = {
             bytes: blob.size,
             mimeType: recorder.mimeType,
-            durationMs: Date.now() - recording.startedAt
+            durationMs,
+            finishedAt,
+            reason: recording.stopReason,
+            filename: link.download
           };
           probe.recording = null;
-          console.info("WebM recording download triggered:", blob.size, "bytes");
+          window.dispatchEvent(new CustomEvent("hls-side-panel-recording-finished", {
+            detail: JSON.stringify({
+              ok: true,
+              reason: recording.stopReason,
+              bytes: blob.size,
+              durationMs,
+              filename: link.download,
+              pageTitle: document.title || location.hostname
+            })
+          }));
+          console.info("WebM recording download triggered:", blob.size, "bytes", "reason:", recording.stopReason);
         };
 
+        recording.autoStopHandler = () => {
+          if (recorder.state === "recording") {
+            recording.stopReason = "ended";
+            console.info("Video ended; automatically stopping WebM recording.");
+            recorder.stop();
+          }
+        };
+        video.addEventListener("ended", recording.autoStopHandler, { once: true });
         probe.recording = recording;
         recorder.start(1000);
+        enableRecordingGuard();
         return {
           ok: true,
-          message: "Recording started.",
+          message: "Recording started with incremental file writes. Refresh warning enabled for this tab.",
           mimeType,
+          storageMode,
+          filename: recording.filename,
           audioTracks: tracks.filter(track => track.kind === "audio").length,
           videoTracks: tracks.filter(track => track.kind === "video").length
         };
@@ -1174,6 +1155,7 @@ async function executeOnSelectedPage(action) {
         if (!recording || recording.recorder.state !== "recording") {
           return { ok: false, message: "There is no active recording." };
         }
+        recording.stopReason = "manual";
         recording.recorder.stop();
         return { ok: true, message: "Recording stopped. Preparing WebM download…" };
       }
@@ -1187,12 +1169,13 @@ async function executeOnSelectedPage(action) {
   return result;
 }
 
-async function waitForDownloadFinalization(timeoutMs = 12000) {
+async function waitForDownloadFinalization(tabId, timeoutMs = 12000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
-      const state = await executeOnSelectedPage("status");
-      if (state.ok && !state.recording) return true;
+      const state = await executeOnSelectedPage("status", tabId);
+      const fileWritePending = [...fileRecordingSessions.values()].some(session => session.tabId === tabId);
+      if (state.ok && !state.recording && !fileWritePending) return true;
     } catch (_) {
       // The user may have navigated away while the recorder was finalizing.
       return false;
@@ -1202,83 +1185,272 @@ async function waitForDownloadFinalization(timeoutMs = 12000) {
   return false;
 }
 
-startRecordingButton.addEventListener("click", async () => {
-  startRecordingButton.disabled = true;
-  setRecordingStatus("Starting recorder…", "working");
+async function syncRecorderControls() {
+  if (recorderUiBusy) return;
   try {
-    const result = await executeOnSelectedPage("start");
-    if (!result.ok) throw new Error(result.message);
-    lastRecordingDurationMs = 0;
-    startRecordingTimer();
-    stopRecordingButton.disabled = false;
+    const tab = await getSelectedTab();
+    const state = await executeOnSelectedPage("status", tab.id);
+    const isRecording = state.recording && state.recorderState === "recording";
+    // Inject and Remove are mutually exclusive for the selected tab.
+    // An existing player means Inject is unavailable and Remove is available.
+    testCustomPlayerButton.disabled = !!state.playerPresent || isRecording;
+    startRecordingButton.disabled = !state.playerPresent || isRecording;
+    stopRecordingButton.disabled = !isRecording;
+    removeSitePlayerButton.disabled = !state.playerPresent || isRecording;
+    if (isRecording && state.startedAt) {
+      recordingStartedAt = state.startedAt;
+      recordingTimerEl.textContent = formatDuration(Date.now() - state.startedAt);
+      setRecordingStatus(`Recording in this tab · ${tab.title || tab.url} · refresh warning active`, "recording");
+    } else if (state.playerPresent) {
+      recordingStartedAt = null;
+      recordingTimerEl.textContent = state.lastRecording?.durationMs
+        ? formatDuration(state.lastRecording.durationMs) : "00:00";
+      if (state.lastRecording && state.lastRecording.finishedAt) {
+        const age = Date.now() - state.lastRecording.finishedAt;
+        if (age < 15000) {
+          setRecordingStatus(`Last recording saved (${state.lastRecording.reason === "ended" ? "video ended" : "stopped manually"}).`, "success");
+        } else {
+          setRecordingStatus("Player ready. Play this tab's video, then start recording.", "idle");
+        }
+      } else {
+        setRecordingStatus("Player ready. Play this tab's video, then start recording.", "success");
+      }
+    } else {
+      recordingStartedAt = null;
+      recordingTimerEl.textContent = "00:00";
+      startRecordingButton.disabled = true;
+      stopRecordingButton.disabled = true;
+      removeSitePlayerButton.disabled = true;
+      setRecordingStatus("Player removed. Select this tab's playlist and click Inject Player to inject it again.", "idle");
+    }
+  } catch (_) {
+    testCustomPlayerButton.disabled = false;
+    startRecordingButton.disabled = true;
+    stopRecordingButton.disabled = true;
     removeSitePlayerButton.disabled = true;
-    testCustomPlayerButton.disabled = true;
-    setRecordingStatus(
-      `Recording WebM · ${result.audioTracks} audio track(s), ${result.videoTracks} video track(s)`,
-      "recording"
-    );
-    addLog("info", `Recording started (${result.mimeType}; audio tracks: ${result.audioTracks}; video tracks: ${result.videoTracks}).`);
+    recordingStartedAt = null;
+    recordingTimerEl.textContent = "00:00";
+    setRecordingStatus("Select a website tab with page access, then click Inject Player.", "idle");
+  }
+}
+
+startRecordingButton.addEventListener("click", async () => {
+  recorderUiBusy = true;
+  startRecordingButton.disabled = true;
+  setRecordingStatus("Choose a destination file…", "working");
+  let sessionId = null;
+  let writable = null;
+  try {
+    if (typeof window.showSaveFilePicker !== "function") {
+      throw new Error("Direct-to-file recording requires a desktop Chromium browser with File System Access support. Please update Chrome and reopen the extension.");
+    }
+
+    // Invoke the picker synchronously from this click handler to preserve user activation.
+    const tabId = Number(tabSelect.value);
+    if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("Select a website tab first.");
+    const tabLabel = tabSelect.selectedOptions?.[0]?.textContent || "course-video";
+    const safeTitle = tabLabel.replace(/[^a-z0-9-_ ]/gi, " ").replace(/\s+/g, " ").trim().slice(0, 48) || "course-video";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const suggestedName = `${safeTitle}-recording-${stamp}.webm`;
+    const fileHandlePromise = window.showSaveFilePicker({
+      suggestedName,
+      types: [{ description: "WebM video", accept: { "video/webm": [".webm"] } }]
+    });
+    const fileHandle = await fileHandlePromise;
+    writable = await fileHandle.createWritable();
+    const tab = await chrome.tabs.get(tabId);
+    if (!isHttpUrl(tab.url)) throw new Error("The selected tab is no longer a normal website tab.");
+
+    sessionId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const session = {
+      sessionId, tabId: tab.id, tabTitle: tab.title || tab.url,
+      filename: fileHandle.name || suggestedName, writable,
+      writeQueue: Promise.resolve(), bytes: 0, startedAt: null, error: null,
+      finalizing: false
+    };
+    fileRecordingSessions.set(sessionId, session);
+
+    const result = await executeOnSelectedPage("start", tab.id, {
+      storageMode: "file", sessionId, filename: session.filename
+    });
+    if (!result.ok) throw new Error(result.message);
+    session.startedAt = Date.now();
+    recordingStartedAt = session.startedAt;
+    recordingTimerEl.textContent = "00:00";
+    setRecordingStatus(`Recording to file · ${session.filename} · ${result.audioTracks} audio / ${result.videoTracks} video track(s) · refresh warning active`, "recording");
+    addLog("info", `Tab ${tab.id}: recording to ${session.filename}; chunks will be written incrementally to disk. Refresh warning enabled for this tab.`);
   } catch (error) {
-    startRecordingButton.disabled = false;
-    setRecordingStatus(error.message, "error");
-    addLog("error", `Could not start recording: ${error.message}`);
+    if (sessionId) fileRecordingSessions.delete(sessionId);
+    if (writable) {
+      try { await writable.abort(); } catch (_) {}
+    }
+    if (error?.name === "AbortError") {
+      setRecordingStatus("Save dialog cancelled; recording was not started.", "idle");
+      addLog("info", "Recording cancelled in the file picker.");
+    } else {
+      setRecordingStatus(error.message || String(error), "error");
+      addLog("error", `Could not start direct-to-file recording: ${error.message || error}`);
+    }
+  } finally {
+    recorderUiBusy = false;
+    await syncRecorderControls();
+  }
+});
+
+// Write each encoded MediaRecorder chunk to its selected file in order.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "HLS_SIDEPANEL_RECORDING_CHUNK_PANEL") {
+    const session = fileRecordingSessions.get(message.sessionId);
+    if (!session) {
+      sendResponse({ ok: false, message: "No active file writer exists for this recording. Keep the side panel open while recording." });
+      return;
+    }
+    session.writeQueue = session.writeQueue.then(async () => {
+      if (session.error) throw new Error(session.error);
+      const binary = atob(message.base64 || "");
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      await session.writable.write(bytes);
+      session.bytes += bytes.byteLength;
+    });
+    session.writeQueue.then(() => sendResponse({ ok: true, bytesWritten: session.bytes })).catch(async error => {
+      session.error = error?.message || String(error);
+      addLog("error", `Tab ${session.tabId}: writing recording to disk failed: ${session.error}`);
+      if (Number(tabSelect.value) === session.tabId) setRecordingStatus(`File write failed: ${session.error}`, "error");
+      try { await executeOnSelectedPage("stop", session.tabId); } catch (_) {}
+      sendResponse({ ok: false, message: session.error });
+    });
+    return true;
+  }
+
+  if (message?.type === "HLS_SIDEPANEL_RECORDING_FINISHED_PANEL") {
+    const detail = message.detail || {};
+    const session = detail.sessionId ? fileRecordingSessions.get(detail.sessionId) : null;
+    if (!session) {
+      sendResponse({ ok: true, detail });
+      return;
+    }
+    session.finalizing = true;
+    (async () => {
+      await session.writeQueue;
+      let finalDetail = { ...detail, filename: session.filename, bytes: session.bytes };
+      if (detail.ok !== false && !session.error && session.bytes > 0) {
+        await session.writable.close();
+        finalDetail.savedToFile = true;
+        addLog("info", `Tab ${session.tabId}: finalized ${session.filename} (${session.bytes.toLocaleString()} bytes).`);
+      } else {
+        try { await session.writable.abort(); } catch (_) {}
+        finalDetail.ok = false;
+        finalDetail.message = session.error || detail.message || (session.bytes === 0
+          ? "No media chunks were written; the output file was not saved."
+          : "Recording did not complete successfully.");
+      }
+      fileRecordingSessions.delete(session.sessionId);
+      if (Number(tabSelect.value) === session.tabId) {
+        if (finalDetail.ok) {
+          setRecordingStatus(`Saved ${session.filename} (${(session.bytes / (1024 * 1024)).toFixed(1)} MB).`, "success");
+          recordingStartedAt = null;
+          recordingTimerEl.textContent = formatDuration(detail.durationMs || 0);
+        } else {
+          setRecordingStatus(`Recording save failed: ${finalDetail.message}`, "error");
+        }
+      }
+      sendResponse({ ok: finalDetail.ok !== false, detail: finalDetail });
+      syncRecorderControls();
+    })().catch(async error => {
+      const failure = error?.message || String(error);
+      try { await session.writable.abort(); } catch (_) {}
+      fileRecordingSessions.delete(session.sessionId);
+      sendResponse({ ok: false, detail: { ...detail, ok: false, filename: session.filename, message: failure } });
+    });
+    return true;
   }
 });
 
 stopRecordingButton.addEventListener("click", async () => {
+  recorderUiBusy = true;
   stopRecordingButton.disabled = true;
-  setRecordingStatus("Stopping recorder and preparing download…", "working");
+  setRecordingStatus("Stopping recorder and finalizing the file…", "working");
   try {
-    const result = await executeOnSelectedPage("stop");
+    const tab = await getSelectedTab();
+    const result = await executeOnSelectedPage("stop", tab.id);
     if (!result.ok) throw new Error(result.message);
-    stopRecordingTimer();
     addLog("info", result.message);
-
-    const finalized = await waitForDownloadFinalization();
-    startRecordingButton.disabled = false;
-    removeSitePlayerButton.disabled = false;
-    testCustomPlayerButton.disabled = false;
+    const finalized = await waitForDownloadFinalization(tab.id);
     setRecordingStatus(
-      finalized
-        ? `WebM download triggered · duration ${formatDuration(lastRecordingDurationMs)}`
-        : `Recorder stopped · duration ${formatDuration(lastRecordingDurationMs)}. Check Chrome downloads.`,
+      finalized ? "Recording file finalized for this tab." : "Recorder stopped. Check the selected file and Logs.",
       finalized ? "success" : "working"
     );
-    if (finalized) addLog("info", "Recorder finalized and the WebM download was triggered.");
+    if (finalized) addLog("info", `Recording from tab ${tab.id} finalized.`);
   } catch (error) {
-    stopRecordingTimer();
-    startRecordingButton.disabled = false;
-    removeSitePlayerButton.disabled = false;
-    testCustomPlayerButton.disabled = false;
     setRecordingStatus(error.message, "error");
     addLog("error", `Could not stop recording cleanly: ${error.message}`);
+  } finally {
+    recorderUiBusy = false;
+    await syncRecorderControls();
   }
 });
 
 removeSitePlayerButton.addEventListener("click", async () => {
+  recorderUiBusy = true;
   removeSitePlayerButton.disabled = true;
   setRecordingStatus("Removing temporary player…", "working");
   try {
-    const result = await executeOnSelectedPage("cleanup");
+    const tab = await getSelectedTab();
+    const result = await executeOnSelectedPage("cleanup", tab.id);
     if (!result.ok) throw new Error(result.message);
     setRecordingStatus(result.message, "idle");
-    startRecordingButton.disabled = true;
-    stopRecordingButton.disabled = true;
-    testCustomPlayerButton.disabled = false;
-    addLog("info", result.message);
+    addLog("info", `Tab ${tab.id}: ${result.message}`);
   } catch (error) {
     setRecordingStatus(error.message, "error");
-    addLog("error", `Could not remove temporary player: ${error.message}`);
-    removeSitePlayerButton.disabled = false;
+    addLog("error", `Could not remove player: ${error.message}`);
+  } finally {
+    recorderUiBusy = false;
+    await syncRecorderControls();
   }
 });
 
+tabSelect.addEventListener("change", () => {
+  // A manual dropdown choice should remain selected until the next browser-tab
+  // activation. Playlist URLs are scoped to the tab that exposed them.
+  followActiveTab = false;
+  ++scanId;
+  selectedButton = null;
+  selectedPlaylistTabId = null;
+  streamsEl.replaceChildren();
+  syncRecorderControls();
+});
+refreshButton.addEventListener("click", () => { setTimeout(syncRecorderControls, 100); });
+
+// Keep the dropdown and recorder controls aligned with the browser tab the user
+// has just switched to. Recording itself remains owned by each individual page.
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  followActiveTab = true;
+  refreshTabs(tabId).then(() => syncRecorderControls()).catch(error => {
+    addLog("warning", `Could not follow active tab: ${error.message || error}`);
+  });
+});
+
+// Refresh labels when a page title or URL changes, without changing the current
+// selection. Include a removed-tab refresh so stale entries disappear promptly.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.title || changeInfo.url) refreshTabs();
+});
+chrome.tabs.onRemoved.addListener(() => refreshTabs());
+
+setInterval(() => {
+  if (recordingStartedAt !== null) recordingTimerEl.textContent = formatDuration(Date.now() - recordingStartedAt);
+  syncRecorderControls();
+}, 1000);
+
 // A newly created diagnostic player becomes available after the test finishes.
 // Keep controls safe if the extension panel is closed/reopened during a recording.
-setRecordingStatus("Run Test Site HLS Player and start playback first.", "idle");
+setRecordingStatus("Select a playlist and click Inject Player to set up this tab.", "idle");
+testCustomPlayerButton.disabled = false;
 startRecordingButton.disabled = true;
 stopRecordingButton.disabled = true;
 removeSitePlayerButton.disabled = true;
+syncRecorderControls();
 
 /** Recording controls end */
 
@@ -1300,7 +1472,7 @@ function safeJson(value) {
 
 if (analyzeHlsButton) {
   analyzeHlsButton.addEventListener("click", async () => {
-    const playlistUrl = selectedButton?.textContent?.trim();
+    const playlistUrl = selectedButton?.dataset?.playlistUrl || selectedButton?.textContent?.trim();
     if (!playlistUrl || !isM3u8(playlistUrl)) {
       setHlsAnalysisStatus("Scan the page and select an HLS playlist first.", "error");
       return;
