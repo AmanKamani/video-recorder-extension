@@ -128,6 +128,40 @@
     }
 
     /* Logs area */
+    .logs-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .logs-toolbar-title { font-size: 12px; color: #d1d5db; }
+
+    .icon-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 30px;
+      padding: 0;
+      background: #374151;
+      color: #f9fafb;
+      border: 1px solid #4b5563;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .icon-button:hover { background: #4b5563; }
+    .icon-button:disabled { opacity: .55; cursor: default; }
+
+    #copyLogsStatus {
+      min-height: 14px;
+      margin: 4px 0 0;
+      font-size: 11px;
+      color: #9ca3af;
+    }
+
     #logsArea {
       height: 150px;
       overflow-y: auto;
@@ -276,8 +310,17 @@
   </div>
 
   <div class="tab-content" id="tabLogs">
-    <div>Extension operation logs:</div>
+    <div class="logs-toolbar">
+      <div class="logs-toolbar-title">Extension operation logs:</div>
+      <button id="copyLogsBtn" class="icon-button" type="button" title="Copy all logs" aria-label="Copy all logs">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="8" y="8" width="13" height="13" rx="2"></rect>
+          <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"></path>
+        </svg>
+      </button>
+    </div>
     <div id="logsArea">--- Logs not available until extension initializes ---</div>
+    <div id="copyLogsStatus" role="status" aria-live="polite"></div>
   </div>
 
   <video id="video" controls playsinline></video>

@@ -169,6 +169,40 @@ clearLogsBtn.addEventListener("click", () => {
 });
 document.getElementById("tabLogs").appendChild(clearLogsBtn);
 
+// Copy all current log entries as plain text for easy sharing.
+const copyLogsBtn = document.getElementById("copyLogsBtn");
+const copyLogsStatus = document.getElementById("copyLogsStatus");
+if (copyLogsBtn) {
+  copyLogsBtn.addEventListener("click", async () => {
+    const text = logEntries.length
+      ? logEntries.map(({ timestamp, level, message }) =>
+          `[${timestamp}] ${String(message).replace(/\s+$/, "")}`
+        ).join("\n")
+      : (logsArea.innerText || "No logs available.");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      if (copyLogsStatus) copyLogsStatus.textContent = `Copied ${logEntries.length} log entries to clipboard.`;
+    } catch (error) {
+      // Fallback for contexts where Clipboard API is unavailable.
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand("copy");
+        textarea.remove();
+        if (!copied) throw new Error("Copy command was rejected");
+        if (copyLogsStatus) copyLogsStatus.textContent = `Copied ${logEntries.length} log entries to clipboard.`;
+      } catch (fallbackError) {
+        if (copyLogsStatus) copyLogsStatus.textContent = "Copy failed. Please select and copy the logs manually.";
+      }
+    }
+  });
+}
+
 async function getSelectedTab() {
   const tabId = Number(tabSelect.value);
 
@@ -601,6 +635,58 @@ const testCustomPlayerButton = document.createElement("button");
 testCustomPlayerButton.textContent = "Test Site HLS Player";
 scanButton.insertAdjacentElement("afterend", testCustomPlayerButton);
 
+const readLiveProbeButton = document.createElement("button");
+readLiveProbeButton.textContent = "Read Live Probe";
+readLiveProbeButton.title = "Read diagnostics from the existing temporary player without recreating it";
+testCustomPlayerButton.insertAdjacentElement("afterend", readLiveProbeButton);
+
+readLiveProbeButton.addEventListener("click", async () => {
+  readLiveProbeButton.disabled = true;
+  try {
+    const tab = await getSelectedTab();
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: () => {
+        const probe = window.__hlsSidePanelProbe;
+        const video = probe?.video;
+        const state = probe?.state;
+        if (!probe || !state) return { exists: false, message: "No diagnostic player exists. Click Test Site HLS Player first." };
+        return {
+          exists: true,
+          video: video ? {
+            paused: video.paused,
+            currentTime: video.currentTime,
+            readyState: video.readyState,
+            networkState: video.networkState,
+            error: video.error?.message ?? null
+          } : null,
+          manifestParsed: state.manifestParsed,
+          keyLoaded: state.keyLoaded,
+          fragmentParsed: state.fragmentParsed,
+          fatalError: state.fatalError,
+          decryptionProbe: state.decryptionProbe,
+          decryptedEventConstant: state.decryptedEventConstant,
+          parsingProbe: state.parsingProbe ?? null,
+          fragmentLoadProbe: state.fragmentLoadProbe ?? null,
+          lastErrorDiagnostic: state.lastErrorDiagnostic ?? null,
+          availableEventConstants: state.availableEventConstants ?? {},
+          eventCounts: state.eventCounts ?? {},
+          videoEvents: state.videoEvents ?? [],
+          recentHlsEvents: (state.events ?? []).slice(-20)
+        };
+      }
+    });
+    addLog("info", "Live site-player probe: " + JSON.stringify(results?.[0]?.result ?? {}, null, 2));
+    setStatus("Live probe captured. The existing temporary player was not recreated.");
+  } catch (error) {
+    addLog("error", `Could not read live probe: ${error.message || error}`);
+    setStatus(`Could not read live probe: ${error.message || error}`);
+  } finally {
+    readLiveProbeButton.disabled = false;
+  }
+});
+
 testCustomPlayerButton.addEventListener("click", async () => {
   const playlistUrl = selectedButton?.textContent?.trim();
 
@@ -630,7 +716,15 @@ testCustomPlayerButton.addEventListener("click", async () => {
           fatalError: null,
           manifestParsed: false,
           keyLoaded: false,
-          fragmentParsed: false
+          fragmentParsed: false,
+          decryptionProbe: {
+            eventSeen: false,
+            byteLength: null,
+            valueType: null
+          },
+          parsingProbe: { count: 0, last: null },
+          fragmentLoadProbe: { count: 0, last: null },
+          eventCounts: {}
         };
 
         window.__hlsSidePanelProbe = { state, hls: null, video: null };
@@ -647,6 +741,17 @@ testCustomPlayerButton.addEventListener("click", async () => {
         document.body.appendChild(video);
 
         const H = window.Hls;
+        state.decryptedEventConstant = H?.Events?.FRAG_DECRYPTED ?? null;
+        state.availableEventConstants = H?.Events
+          ? Object.fromEntries(Object.entries(H.Events).filter(([key]) => /FRAG|KEY|BUFFER|PARS|DECRYPT|MANIFEST/i.test(key)))
+          : {};
+        state.videoEvents = [];
+        for (const eventName of ["play", "playing", "pause", "canplay", "waiting", "error"]) {
+          video.addEventListener(eventName, () => {
+            state.videoEvents.push({ event: eventName, currentTime: video.currentTime, readyState: video.readyState });
+            if (state.videoEvents.length > 20) state.videoEvents.shift();
+          });
+        }
 
         if (typeof H !== "function" || !H.isSupported()) {
           state.fatalError = "Page HLS constructor unavailable or unsupported.";
@@ -658,12 +763,33 @@ testCustomPlayerButton.addEventListener("click", async () => {
         window.__hlsSidePanelProbe.video = video;
 
         const record = (name, data) => {
+          state.eventCounts[name] = (state.eventCounts[name] ?? 0) + 1;
           state.events.push({
             name,
             details: data?.details ?? null,
             fatal: data?.fatal ?? false
           });
-          if (state.events.length > 30) state.events.shift();
+          if (state.events.length > 40) state.events.shift();
+        };
+
+        // Metadata-only inspection. Never construct a view over HLS buffers:
+        // customized builds may transfer/detach those buffers immediately.
+        const byteInfo = value => {
+          try {
+            if (value == null) return { byteLength: null, valueType: String(value) };
+            let type = typeof value;
+            try { type = value.constructor?.name ?? type; } catch (_) {}
+            let byteLength = null;
+            try {
+              if (typeof value.byteLength === "number") byteLength = value.byteLength;
+              else if (typeof value.length === "number") byteLength = value.length;
+            } catch (error) {
+              return { byteLength: null, valueType: type, accessError: String(error?.message ?? error) };
+            }
+            return { byteLength, valueType: type };
+          } catch (error) {
+            return { byteLength: null, valueType: "unavailable", accessError: String(error?.message ?? error) };
+          }
         };
 
         hls.on(H.Events.MANIFEST_PARSED, (_, data) => {
@@ -678,15 +804,113 @@ testCustomPlayerButton.addEventListener("click", async () => {
           });
         });
 
+        hls.on(H.Events.FRAG_DECRYPTED, (_, data) => {
+          const payload = (() => { try { return data?.payload; } catch (error) { return { __readError: String(error?.message ?? error) }; } })();
+          const info = payload?.__readError
+            ? { eventSeen: true, byteLength: null, payloadType: "unavailable", accessError: payload.__readError }
+            : { eventSeen: true, ...byteInfo(payload) };
+          state.decryptionProbe = info;
+          record("FRAG_DECRYPTED", {
+            details: info.accessError ? "event fired; payload metadata inaccessible" : `event fired; payload type=${info.valueType ?? "unknown"}, bytes=${info.byteLength ?? "?"}`
+          });
+        });
+
+        if (H.Events.FRAG_PARSING_DATA) {
+          hls.on(H.Events.FRAG_PARSING_DATA, (_, data) => {
+            state.parsingProbe.count += 1;
+            state.parsingProbe.last = {
+              type: data?.type ?? null,
+              startPTS: Number.isFinite(data?.startPTS) ? data.startPTS : null,
+              endPTS: Number.isFinite(data?.endPTS) ? data.endPTS : null,
+              data1: byteInfo(data?.data1),
+              data2: byteInfo(data?.data2)
+            };
+            record("FRAG_PARSING_DATA", {
+              details: `${data?.type ?? "unknown"}: data1=${state.parsingProbe.last.data1.byteLength ?? "?"} bytes, data2=${state.parsingProbe.last.data2.byteLength ?? "?"} bytes`
+            });
+          });
+        }
+
+        if (H.Events.FRAG_BUFFERED) {
+          hls.on(H.Events.FRAG_BUFFERED, (_, data) => {
+            record("FRAG_BUFFERED", data);
+          });
+        }
+
+        // Keep this listener deliberately defensive: some customized HLS builds
+        // expose getters that can throw while an event is being dispatched.
+        const safeRead = (obj, key) => {
+          try { return obj == null ? undefined : obj[key]; }
+          catch (error) { return { __probeReadError: String(error?.message ?? error) }; }
+        };
+        const safeKeys = obj => {
+          try { return obj && typeof obj === "object" ? Object.keys(obj).slice(0, 20) : []; }
+          catch (error) { return [`<keys error: ${String(error?.message ?? error)}>`]; }
+        };
+        const safeSummary = value => {
+          if (value && value.__probeReadError) return { accessError: value.__probeReadError };
+          return byteInfo(value);
+        };
+
+        if (H.Events.FRAG_LOADED) {
+          hls.on(H.Events.FRAG_LOADED, (_, data) => {
+            try {
+              const frag = safeRead(data, "frag");
+              const fragType = safeRead(frag, "type");
+              const fragUrl = safeRead(frag, "url");
+              const eventData = safeRead(data, "data");
+              const payload = safeRead(data, "payload");
+              const stats = safeRead(data, "stats");
+              state.fragmentLoadProbe.count += 1;
+              state.fragmentLoadProbe.last = {
+                type: typeof fragType === "string" ? fragType : null,
+                urlPresent: typeof fragUrl === "string" && fragUrl.length > 0,
+                dataKeys: safeKeys(data),
+                fragKeys: safeKeys(frag),
+                // Never inspect frag.data or construct views over buffers in this customized HLS build.
+                fragData: { notRead: true },
+                eventData: safeSummary(eventData),
+                payload: safeSummary(payload),
+                stats: stats && !stats.__probeReadError ? {
+                  loaded: safeRead(stats, "loaded") ?? null,
+                  total: safeRead(stats, "total") ?? null,
+                  chunkCount: safeRead(stats, "chunkCount") ?? null
+                } : null
+              };
+              record("FRAG_LOADED", {
+                details: `loaded ${state.fragmentLoadProbe.last.type ?? "unknown"} fragment; metadata captured safely`
+              });
+            } catch (error) {
+              state.fragmentLoadProbe.listenerError = String(error?.message ?? error);
+            }
+          });
+        }
+
         hls.on(H.Events.FRAG_PARSED, (_, data) => {
           state.fragmentParsed = true;
           record("FRAG_PARSED", data);
         });
 
         hls.on(H.Events.ERROR, (_, data) => {
-          record("ERROR", data);
-          if (data?.fatal) {
-            state.fatalError = data.details || data.type || "Fatal HLS error";
+          const details = safeRead(data, "details");
+          const errorObj = safeRead(data, "error");
+          const errorName = safeRead(errorObj, "name");
+          const errorMessage = safeRead(errorObj, "message");
+          const fatal = safeRead(data, "fatal");
+          record("ERROR", {
+            details: typeof details === "string" ? details : null,
+            fatal: fatal === true
+          });
+          state.lastErrorDiagnostic = {
+            details: typeof details === "string" ? details : null,
+            type: safeRead(data, "type") ?? null,
+            fatal: fatal === true,
+            errorName: typeof errorName === "string" ? errorName : null,
+            errorMessage: typeof errorMessage === "string" ? errorMessage : null,
+            dataKeys: safeKeys(data)
+          };
+          if (fatal === true) {
+            state.fatalError = (typeof details === "string" && details) || "Fatal HLS error";
           }
         });
 
@@ -700,6 +924,12 @@ testCustomPlayerButton.addEventListener("click", async () => {
           manifestParsed: state.manifestParsed,
           keyLoaded: state.keyLoaded,
           fragmentParsed: state.fragmentParsed,
+          decryptionProbe: state.decryptionProbe,
+          parsingProbe: state.parsingProbe,
+          fragmentLoadProbe: state.fragmentLoadProbe,
+          lastErrorDiagnostic: state.lastErrorDiagnostic ?? null,
+          availableEventConstants: state.availableEventConstants,
+          eventCounts: state.eventCounts,
           fatalError: state.fatalError,
           events: state.events,
           videoReadyState: video.readyState,
@@ -713,6 +943,18 @@ testCustomPlayerButton.addEventListener("click", async () => {
       "info",
       "Site HLS test: " + JSON.stringify(testResult, null, 2)
     );
+
+    if (testResult.decryptionProbe?.eventSeen) {
+      addLog(
+        "info",
+        "Decrypted fragment probe: " + JSON.stringify(testResult.decryptionProbe, null, 2)
+      );
+    } else {
+      addLog(
+        "warning",
+        "No FRAG_DECRYPTED payload observed in the initial snapshot. Do not rerun Test Site HLS Player yet (it recreates the player). Press Play on the existing temporary player, then click Read Live Probe."
+      );
+    }
 
     if (testResult.manifestParsed && !testResult.fatalError && testResult.videoReadyState > 0) {
       setRecordingStatus(
