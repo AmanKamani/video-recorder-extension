@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HLS Side Panel Pro",
-  "version": "1.8.3",
-  "description": "Record authorized HLS playback to WebM files with tab-scoped playlist scans, refresh warnings during recording, incremental disk writes, independent tab sessions, and automatic completion notifications.",
+  "version": "1.8.4",
+  "description": "Record authorized HLS playback to WebM files with tab-scoped playlist scans, refresh warnings during recording, incremental disk writes, post-recording WebM duration and seek-index repair, independent tab sessions, and automatic completion notifications.",
   "permissions": [
     "tabs",
     "scripting",
