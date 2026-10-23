@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <title>HLS Side Panel Pro</title>
+  <link rel="stylesheet" href="assets/fontawesome/css/fontawesome.min.css">
+  <link rel="stylesheet" href="assets/fontawesome/css/solid.min.css">
 
   <style>
     body {
@@ -45,12 +47,14 @@
       cursor: not-allowed;
     }
 
-    video {
-      width: 100%;
-      background: black;
-      border-radius: 8px;
-      margin-top: 12px;
-    }
+    button .fa-solid { margin-right: 7px; }
+    .icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+    .icon-button .fa-solid { margin: 0; }
+    .section-heading { display: flex; align-items: center; gap: 8px; }
+    .version-footer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #374151; color: #9ca3af; font-size: 11px; display: flex; justify-content: space-between; gap: 8px; }
+    details.diagnostics { margin-top: 12px; border: 1px solid #374151; border-radius: 8px; padding: 10px; background: #111827; }
+    details.diagnostics summary { cursor: pointer; font-weight: 600; }
+    .diagnostics-actions { margin-top: 8px; }
 
     #status {
       color: #cbd5e1;
@@ -228,14 +232,14 @@
 </head>
 
 <body>
-  <h2>HLS Side Panel Pro</h2>
+  <h2><i class="fa-solid fa-film" aria-hidden="true"></i> HLS Side Panel Pro</h2>
 
   <label for="tabSelect">Website tab</label>
   <select id="tabSelect">
     <option value="">Loading browser tabs...</option>
   </select>
 
-  <button id="refreshTabs">Refresh tabs</button>
+  <button id="refreshTabs" class="icon-button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> Refresh tabs</button>
   <button id="scan">Grant access & scan selected tab</button>
 
   <p id="status" role="status">
@@ -244,8 +248,8 @@
 
   <!-- Tab navigation -->
   <div class="tab-nav" id="tabNav">
-    <button class="active" data-tab="streams">Streams</button>
-    <button data-tab="logs">Logs</button>
+    <button class="active" data-tab="streams"><i class="fa-solid fa-list" aria-hidden="true"></i> Streams</button>
+    <button data-tab="logs"><i class="fa-solid fa-terminal" aria-hidden="true"></i> Logs</button>
   </div>
 
   <!-- Tab content panels -->
@@ -254,42 +258,47 @@
     <div id="streams"></div>
 
     <section class="recording-panel" aria-label="HLS download analysis">
-      <h3>Direct Download Analysis</h3>
+      <h3 class="section-heading"><i class="fa-solid fa-microscope" aria-hidden="true"></i> Direct Download Analysis</h3>
       <p class="hint">Inspect playlist structure, video/audio tracks, segment format, and key-response metadata before enabling direct downloading.</p>
-      <button id="analyzeHls">Analyze Selected HLS</button>
+      <button id="analyzeHls" class="icon-button"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Analyze Selected HLS</button>
       <div id="hlsAnalysisStatus" role="status" aria-live="polite" data-state="idle">Select a playlist, then run analysis.</div>
       <pre id="hlsAnalysisDetails" class="analysis-details" hidden></pre>
     </section>
 
     <section class="recording-panel" aria-label="WebM recorder">
-      <h3>WebM Recorder</h3>
+      <h3 class="section-heading"><i class="fa-solid fa-circle-dot" aria-hidden="true"></i> WebM Recorder</h3>
       <div id="recordingStatus" role="status" aria-live="polite" data-state="idle">
         Inject the player and start playback first. Choose a file before each recording.
       </div>
       <div id="recordingTimer" aria-label="Recording duration">00:00</div>
       <div class="recording-actions">
-        <button id="injectSitePlayer">Inject Player</button>
-        <button id="startRecording" disabled>Start Recording (Choose File)</button>
-        <button id="stopRecording" disabled>Stop &amp; Download</button>
-        <button id="removeSitePlayer" disabled>Remove Player</button>
+        <button id="injectSitePlayer" class="icon-button"><i class="fa-solid fa-video" aria-hidden="true"></i> Inject Player</button>
+        <button id="startRecording" class="icon-button" disabled><i class="fa-solid fa-record-vinyl" aria-hidden="true"></i> Start Recording (Choose File)</button>
+        <button id="stopRecording" class="icon-button" disabled><i class="fa-solid fa-stop" aria-hidden="true"></i> Stop &amp; Download</button>
+        <button id="removeSitePlayer" class="icon-button" disabled><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Remove Player</button>
       </div>
       <p class="hint">For each website tab: select its playlist, click Inject Player, play the temporary video, then start recording. You can switch tabs and start other recordings; existing recordings continue independently. Each recording writes WebM chunks directly to the file you choose, reducing memory use for long videos. The file is finalized when you stop recording or the video ends. Keep this side panel open while recording; Chrome must remain running.</p>
     </section>
   </div>
 
   <div class="tab-content" id="tabLogs">
-    <div>Extension operation logs:</div>
+    <div class="section-heading"><i class="fa-solid fa-terminal" aria-hidden="true"></i> Extension operation logs</div>
     <div id="logsArea">--- Logs not available until extension initializes ---</div>
+    <div class="recording-actions">
+      <button id="copyLogs" class="icon-button"><i class="fa-solid fa-copy" aria-hidden="true"></i> Copy all logs</button>
+      <button id="clearLogs" class="icon-button"><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Clear logs</button>
+    </div>
+    <details class="diagnostics" id="advancedDiagnostics">
+      <summary><i class="fa-solid fa-stethoscope" aria-hidden="true"></i> Advanced Diagnostics</summary>
+      <p class="hint">Keep detailed HLS events, key-loading status, fragment metadata, and the FRAG_DECRYPTED probe. Media payload bytes are never copied by the probe.</p>
+      <button id="readLiveProbe" class="icon-button"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Read Live Probe</button>
+      <div id="advancedDiagnosticsActions" class="diagnostics-actions"></div>
+    </details>
   </div>
 
-  <video id="video" controls playsinline></video>
+  <p class="hint">The player is injected into the selected website tab; this side panel does not embed a separate playback preview. The extension does not bypass login or DRM.</p>
+  <footer class="version-footer"><span>HLS Side Panel Pro</span><span id="extensionVersion">v—</span></footer>
 
-  <p class="hint">
-    Playback depends on the site's authorization and CDN CORS policy.
-    This extension does not bypass login or DRM.
-  </p>
-
-  <script src="hls.min.js"></script>
-  <script src="sidepanel.js"></script>
+  <script type="module" src="sidepanel.js"></script>
 </body>
 </html>

@@ -1,9 +1,34 @@
-# Page HLS Side Panel v1.3
+# HLS Side Panel Pro — v1.9.0
 
-1. Add the browser build `hls.min.js` from https://github.com/video-dev/hls.js/releases beside `sidepanel.html`.
-2. Open `chrome://extensions`, enable Developer mode, and click **Load unpacked**. Select this folder.
-3. Open your logged-in website in a normal HTTP(S) tab.
-4. Click the extension icon to open the side panel. Click **Grant page access & scan active tab**, then approve the site's permission prompt.
-5. Start or resume the video and scan again if needed. Click a detected playlist to attempt playback.
+This extension uses native JavaScript ES modules and Manifest V3.
 
-This build requests optional host access only for the active website when the user clicks Scan. It separately requests permission for a selected stream host. Permissions do not bypass authentication, CORS, expiring URLs, or DRM. Some browser-internal pages cannot be inspected.
+## Module structure
+
+- `sidepanel.html` loads `sidepanel.js` as a module (`type="module"`).
+- `sidepanel.js` imports the feature modules under `modules/`.
+- `background.js` runs as a Manifest V3 ES-module service worker.
+- Shared helpers and feature modules use native `import` / `export`; no transpilation or bundler is required for the current code.
+
+## Load the extension
+
+1. Extract this ZIP to a folder.
+2. Open `chrome://extensions` and enable **Developer mode**.
+3. Choose **Load unpacked** and select the extracted `video-recorder-extension` folder.
+4. Open the authorized website in a regular HTTP(S) tab.
+5. Open the extension side panel and use **Grant page access & scan active tab** when you want to scan the selected tab. Approve the host permission if Chrome asks.
+
+## Development checks
+
+Node.js is required for the syntax check. Run:
+
+```sh
+npm test
+```
+
+To format supported source files, run the repository's configured Prettier workflow. Avoid formatting minified vendor bundles such as `hls.min.js`.
+
+## Notes
+
+- The extension version intentionally remains **1.9.0** during testing.
+- Optional host access is requested for user-initiated actions. Permissions do not bypass authentication, CORS, expiring URLs, or DRM.
+- Syntax checks do not replace runtime testing in Chrome.
