@@ -17,6 +17,35 @@ This extension uses native JavaScript ES modules and Manifest V3.
 4. Open the authorized website in a regular HTTP(S) tab.
 5. Open the extension side panel and use **Grant page access & scan active tab** when you want to scan the selected tab. Approve the host permission if Chrome asks.
 
+## Parallel segmented recording
+
+For a finite VOD stream, select a value up to the configured maximum with the **Recording
+segments** slider after selecting a playlist, then click the checkmark Apply icon. The
+extension creates that many website players, divides the full timeline evenly, and displays
+each segment's start, end, duration, progress, and state. The website player box can be
+dragged or minimized. **Start All Segments** starts every player and recorder in parallel,
+and the recorder timer shows wall-clock time until the last segment finishes.
+
+Each segment is written to temporary browser storage. The extension waits for every segment,
+merges them in timeline order into the chosen WebM file, repairs duration and seek metadata,
+and then sends one completion notification. A failed or incompatible segment keeps successful
+temporary files intact and shows a refresh icon for re-recording only that range. A transient
+merge failure can be retried without recording the segments again. No partial recording is
+published. Sanitized job failures are retained in extension storage and copied into the Logs
+view on the next side-panel session.
+
+Equivalent WebM audio/video tracks are matched by codec configuration during merging. If
+independent MediaRecorder instances assign different track numbers, block references are
+remapped automatically and each segment's allocation is reported in the Logs view.
+
+Segmented mode supports finite VOD streams only. Running several players increases network,
+CPU, and encoder usage. Background playback is best-effort because Chrome may throttle hidden
+tabs; stalled segments can be retried individually after the other ranges finish. Keep the side
+panel open until merging and metadata repair finish. Different user-opened website tabs can run
+independent segmented jobs.
+
+Apply **Recording segments** value 1 to use the original single-player recording workflow.
+
 ## Development checks
 
 Node.js is required for the syntax check. Run:

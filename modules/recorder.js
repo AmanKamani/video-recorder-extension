@@ -19,6 +19,9 @@ export function createRecorderController({
   const startRecordingButton = document.getElementById("startRecording");
   const stopRecordingButton = document.getElementById("stopRecording");
   const removeSitePlayerButton = document.getElementById("removeSitePlayer");
+  const segmentCountInput = document.getElementById("segmentCount");
+  const segmentedModeEnabled = () =>
+    Number(document.getElementById("segmentCount")?.dataset.appliedCount || 1) > 1;
 
   // Bridge chunk data from the page's MAIN world to the extension side panel.
   // The queue preserves chunk order and waits for each disk write acknowledgement.
@@ -544,6 +547,7 @@ export function createRecorderController({
 
   /** Reconciles button enabled/disabled states with the selected tab’s player and recording state. */
   async function syncRecorderControls() {
+    if (segmentedModeEnabled()) return;
     if (recorderUiBusy) return;
     try {
       const tab = await getSelectedTab();
@@ -555,6 +559,7 @@ export function createRecorderController({
         startRecordingButton.disabled = true;
         stopRecordingButton.disabled = true;
         removeSitePlayerButton.disabled = true;
+        if (segmentCountInput) segmentCountInput.disabled = false;
         recordingStartedAt = null;
         recordingTimerEl.textContent = "00:00";
         setRecordingStatus(
@@ -564,6 +569,7 @@ export function createRecorderController({
         return;
       }
       const isRecording = state.recording && state.recorderState === "recording";
+      if (segmentCountInput) segmentCountInput.disabled = isRecording;
       // Inject and Remove are mutually exclusive for the selected tab.
       // An existing player means Inject is unavailable and Remove is available.
       injectButton.disabled = !!state.playerPresent || isRecording;
@@ -617,6 +623,7 @@ export function createRecorderController({
       startRecordingButton.disabled = true;
       stopRecordingButton.disabled = true;
       removeSitePlayerButton.disabled = true;
+      if (segmentCountInput) segmentCountInput.disabled = false;
       recordingStartedAt = null;
       recordingTimerEl.textContent = "00:00";
       setRecordingStatus(
@@ -642,6 +649,7 @@ export function createRecorderController({
         });
         return;
       }
+      // Serialize writes per session so runtime-message timing cannot reorder file chunks.
       session.writeQueue = session.writeQueue.then(async () => {
         if (session.error) throw new Error(session.error);
         const binary = atob(message.base64 || "");
@@ -677,6 +685,7 @@ export function createRecorderController({
       }
       session.finalizing = true;
       (async () => {
+        // The completion event can arrive before the final queued write has reached disk.
         await session.writeQueue;
         let finalDetail = { ...detail, filename: session.filename, bytes: session.bytes };
         if (detail.ok !== false && !session.error && session.bytes > 0) {
@@ -760,7 +769,9 @@ export function createRecorderController({
 
   // Opens a save-file picker and starts direct-to-file recording for the selected website tab.
   startRecordingButton.addEventListener("click", async () => {
+    if (segmentedModeEnabled()) return;
     recorderUiBusy = true;
+    if (segmentCountInput) segmentCountInput.disabled = true;
     startRecordingButton.disabled = true;
     setRecordingStatus("Choose a destination file…", "working");
     let sessionId = null;
@@ -851,6 +862,7 @@ export function createRecorderController({
 
   // Stops the active recording and waits for its file to be finalized.
   stopRecordingButton.addEventListener("click", async () => {
+    if (segmentedModeEnabled()) return;
     recorderUiBusy = true;
     stopRecordingButton.disabled = true;
     setRecordingStatus("Stopping recorder and finalizing the file…", "working");
@@ -878,6 +890,7 @@ export function createRecorderController({
 
   // Removes the temporary player from the selected page when no recording is active.
   removeSitePlayerButton.addEventListener("click", async () => {
+    if (segmentedModeEnabled()) return;
     recorderUiBusy = true;
     removeSitePlayerButton.disabled = true;
     setRecordingStatus("Removing temporary player…", "working");

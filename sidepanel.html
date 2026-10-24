@@ -1,304 +1,541 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <title>HLS Side Panel Pro</title>
-  <link rel="stylesheet" href="assets/fontawesome/css/fontawesome.min.css">
-  <link rel="stylesheet" href="assets/fontawesome/css/solid.min.css">
+    <title>HLS Side Panel Pro</title>
+    <link rel="stylesheet" href="assets/fontawesome/css/fontawesome.min.css" />
+    <link rel="stylesheet" href="assets/fontawesome/css/solid.min.css" />
 
-  <style>
-    body {
-      padding: 14px;
-      margin: 0;
-      background: #111827;
-      color: #f9fafb;
-      font: 14px Arial, sans-serif;
-    }
+    <style>
+      body {
+        padding: 14px;
+        margin: 0;
+        background: #111827;
+        color: #f9fafb;
+        font:
+          14px Arial,
+          sans-serif;
+      }
 
-    h2 {
-      margin-top: 0;
-    }
+      h2 {
+        margin-top: 0;
+      }
 
-    select, button {
-      box-sizing: border-box;
-      width: 100%;
-      padding: 10px;
-      margin: 5px 0;
-      border-radius: 6px;
-    }
+      select,
+      button {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 6px;
+      }
 
-    select {
-      color: white;
-      background: #1f2937;
-      border: 1px solid #4b5563;
-    }
+      select {
+        color: white;
+        background: #1f2937;
+        border: 1px solid #4b5563;
+      }
 
-    button {
-      color: white;
-      background: #2563eb;
-      border: none;
-      cursor: pointer;
-    }
+      button {
+        color: white;
+        background: #2563eb;
+        border: none;
+        cursor: pointer;
+      }
 
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
 
-    button .fa-solid { margin-right: 7px; }
-    .icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
-    .icon-button .fa-solid { margin: 0; }
-    .section-heading { display: flex; align-items: center; gap: 8px; }
-    .version-footer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #374151; color: #9ca3af; font-size: 11px; display: flex; justify-content: space-between; gap: 8px; }
-    details.diagnostics { margin-top: 12px; border: 1px solid #374151; border-radius: 8px; padding: 10px; background: #111827; }
-    details.diagnostics summary { cursor: pointer; font-weight: 600; }
-    .diagnostics-actions { margin-top: 8px; }
+      button .fa-solid {
+        margin-right: 7px;
+      }
+      .icon-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+      }
+      .icon-button .fa-solid {
+        margin: 0;
+      }
+      .section-heading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .version-footer {
+        margin-top: 16px;
+        padding-top: 10px;
+        border-top: 1px solid #374151;
+        color: #9ca3af;
+        font-size: 11px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      details.diagnostics {
+        margin-top: 12px;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        padding: 10px;
+        background: #111827;
+      }
+      details.diagnostics summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .diagnostics-actions {
+        margin-top: 8px;
+      }
 
-    #status {
-      color: #cbd5e1;
-      font-size: 12px;
-      line-height: 1.5;
-      overflow-wrap: anywhere;
-    }
+      #status {
+        color: #cbd5e1;
+        font-size: 12px;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
 
-    .stream {
-      display: block;
-      width: 100%;
-      padding: 10px;
-      margin: 7px 0;
-      color: white;
-      background: #1f2937;
-      border: 1px solid #374151;
-      text-align: left;
-      overflow-wrap: anywhere;
-    }
+      .stream {
+        display: block;
+        width: 100%;
+        padding: 10px;
+        margin: 7px 0;
+        color: white;
+        background: #1f2937;
+        border: 1px solid #374151;
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
 
-    .stream.selected {
-      border-color: #60a5fa;
-      background: #1e3a5f;
-    }
+      .stream.selected {
+        border-color: #60a5fa;
+        background: #1e3a5f;
+      }
 
-    .hint {
-      color: #9ca3af;
-      font-size: 12px;
-      line-height: 1.5;
-    }
+      .hint {
+        color: #9ca3af;
+        font-size: 12px;
+        line-height: 1.5;
+      }
 
-    /* Tab navigation */
-    .tab-nav {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 12px;
-      background: #1f2937;
-      border-radius: 6px;
-      padding: 4px;
-    }
+      /* Tab navigation */
+      .tab-nav {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 12px;
+        background: #1f2937;
+        border-radius: 6px;
+        padding: 4px;
+      }
 
-    .tab-nav button {
-      flex: 1;
-      background: transparent;
-      border: none;
-      color: #6b7280;
-      padding: 8px 12px;
-      border-radius: 4px;
-      font-size: 12px;
-      cursor: pointer;
-    }
+      .tab-nav button {
+        flex: 1;
+        background: transparent;
+        border: none;
+        color: #6b7280;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        cursor: pointer;
+      }
 
-    .tab-nav button:hover {
-      background: #374151;
-      color: #f9fafb;
-    }
+      .tab-nav button:hover {
+        background: #374151;
+        color: #f9fafb;
+      }
 
-    .tab-nav button.active {
-      background: #2563eb;
-      color: #f9fafb;
-    }
+      .tab-nav button.active {
+        background: #2563eb;
+        color: #f9fafb;
+      }
 
-    /* Tab content panels */
-    .tab-content {
-      display: none;
-      background: #1f2937;
-      border: 1px solid #374151;
-      border-radius: 6px;
-      padding: 12px;
-      margin-top: 8px;
-    }
+      /* Tab content panels */
+      .tab-content {
+        display: none;
+        background: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 12px;
+        margin-top: 8px;
+      }
 
-    .tab-content.active {
-      display: block;
-    }
+      .tab-content.active {
+        display: block;
+      }
 
-    /* Logs area */
-    #logsArea {
-      height: 150px;
-      overflow-y: auto;
-      background: #0d1117;
-      border-radius: 4px;
-      padding: 8px;
-      font-family: monospace;
-      font-size: 11px;
-      color: #d1d5db;
-      white-space: pre-wrap;
-    }
+      /* Logs area */
+      #logsArea {
+        height: 150px;
+        overflow-y: auto;
+        background: #0d1117;
+        border-radius: 4px;
+        padding: 8px;
+        font-family: monospace;
+        font-size: 11px;
+        color: #d1d5db;
+        white-space: pre-wrap;
+      }
 
-    .log-entry {
-      padding: 2px 0;
-      border-bottom: 1px solid #374151;
-      margin: 2px 0;
-    }
+      .log-entry {
+        padding: 2px 0;
+        border-bottom: 1px solid #374151;
+        margin: 2px 0;
+      }
 
-    .log-entry.timestamp {
-      color: #8884dc;
-    }
+      .log-entry.timestamp {
+        color: #8884dc;
+      }
 
-    .log-entry.level-info { color: #3b82f6; }
-    .log-entry.level-warning { color: #f59e0b; }
-    .log-entry.level-error { color: #ef4444; }
+      .log-entry.level-info {
+        color: #3b82f6;
+      }
+      .log-entry.level-warning {
+        color: #f59e0b;
+      }
+      .log-entry.level-error {
+        color: #ef4444;
+      }
 
+      /* Recorder state, actions, and per-segment progress */
+      .recording-panel {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        background: #111827;
+      }
 
-    .recording-panel {
-      margin-top: 12px;
-      padding: 12px;
-      border: 1px solid #374151;
-      border-radius: 8px;
-      background: #111827;
-    }
+      .recording-panel h3 {
+        margin: 0 0 8px;
+      }
 
-    .recording-panel h3 { margin: 0 0 8px; }
+      #recordingStatus {
+        padding: 8px;
+        border-radius: 6px;
+        background: #1f2937;
+        color: #cbd5e1;
+        font-size: 12px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
 
-    #recordingStatus {
-      padding: 8px;
-      border-radius: 6px;
-      background: #1f2937;
-      color: #cbd5e1;
-      font-size: 12px;
-      line-height: 1.45;
-      overflow-wrap: anywhere;
-    }
+      #recordingStatus[data-state="recording"] {
+        color: #fca5a5;
+      }
+      #recordingStatus[data-state="success"] {
+        color: #86efac;
+      }
+      #recordingStatus[data-state="error"] {
+        color: #fca5a5;
+      }
+      #recordingStatus[data-state="working"] {
+        color: #fcd34d;
+      }
 
-    #recordingStatus[data-state="recording"] { color: #fca5a5; }
-    #recordingStatus[data-state="success"] { color: #86efac; }
-    #recordingStatus[data-state="error"] { color: #fca5a5; }
-    #recordingStatus[data-state="working"] { color: #fcd34d; }
+      #hlsAnalysisStatus {
+        padding: 8px;
+        border-radius: 6px;
+        background: #1f2937;
+        color: #cbd5e1;
+        font-size: 12px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+      #hlsAnalysisStatus[data-state="success"] {
+        color: #86efac;
+      }
+      #hlsAnalysisStatus[data-state="error"] {
+        color: #fca5a5;
+      }
+      #hlsAnalysisStatus[data-state="working"] {
+        color: #fcd34d;
+      }
+      .analysis-details {
+        max-height: 260px;
+        overflow: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 11px;
+        padding: 8px;
+        border-radius: 6px;
+        background: #0d1117;
+        color: #d1d5db;
+      }
 
-    #hlsAnalysisStatus {
-      padding: 8px;
-      border-radius: 6px;
-      background: #1f2937;
-      color: #cbd5e1;
-      font-size: 12px;
-      line-height: 1.45;
-      overflow-wrap: anywhere;
-    }
-    #hlsAnalysisStatus[data-state="success"] { color: #86efac; }
-    #hlsAnalysisStatus[data-state="error"] { color: #fca5a5; }
-    #hlsAnalysisStatus[data-state="working"] { color: #fcd34d; }
-    .analysis-details {
-      max-height: 260px;
-      overflow: auto;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font-size: 11px;
-      padding: 8px;
-      border-radius: 6px;
-      background: #0d1117;
-      color: #d1d5db;
-    }
+      #recordingTimer {
+        margin: 10px 0;
+        font-size: 28px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+        letter-spacing: 1px;
+      }
 
-    #recordingTimer {
-      margin: 10px 0;
-      font-size: 28px;
-      font-weight: 700;
-      font-variant-numeric: tabular-nums;
-      text-align: center;
-      letter-spacing: 1px;
-    }
+      .recording-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
 
-    .recording-actions {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-    }
+      .recording-actions button {
+        margin: 0;
+      }
+      #stopRecording {
+        background: #b91c1c;
+      }
+      #injectSitePlayer {
+        grid-column: 1 / -1;
+        background: #0f766e;
+      }
+      #removeSitePlayer {
+        grid-column: 1 / -1;
+        background: #374151;
+      }
 
-    .recording-actions button { margin: 0; }
-    #stopRecording { background: #b91c1c; }
-    #injectSitePlayer { grid-column: 1 / -1; background: #0f766e; }
-    #removeSitePlayer { grid-column: 1 / -1; background: #374151; }
+      .segment-config {
+        margin-bottom: 10px;
+      }
+      .segment-config-controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 28px 38px;
+        align-items: center;
+        gap: 7px;
+      }
+      #segmentCount {
+        width: 100%;
+        accent-color: #2563eb;
+      }
+      #segmentCountValue {
+        text-align: center;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      #applySegmentCount {
+        width: 38px;
+        height: 34px;
+        margin: 0;
+        padding: 0;
+      }
+      .segment-option {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 0 4px;
+        color: #d1d5db;
+        font-size: 12px;
+      }
+      .segment-option input {
+        margin: 0;
+        accent-color: #2563eb;
+      }
+      .segment-list {
+        display: grid;
+        gap: 7px;
+        margin: 8px 0;
+      }
+      .segment-row {
+        padding: 8px;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        background: #1f2937;
+      }
+      .segment-row-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+      }
+      .segment-row-actions {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .segment-retry-button {
+        width: 28px;
+        height: 26px;
+        margin: 0;
+        padding: 0;
+        background: #0f766e;
+      }
+      .segment-retry-button[hidden] {
+        display: none;
+      }
+      .segment-timing {
+        margin: 4px 0;
+        color: #cbd5e1;
+        font-size: 11px;
+      }
+      .segment-row progress {
+        width: calc(100% - 42px);
+        vertical-align: middle;
+      }
+      .segment-percent {
+        display: inline-block;
+        width: 38px;
+        text-align: right;
+        font-size: 11px;
+      }
+      .segment-state-failed {
+        border-color: #dc2626;
+      }
+      .segment-state-finished {
+        border-color: #16a34a;
+      }
+      .segment-error {
+        margin-top: 5px;
+        color: #fca5a5;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
 
-  </style>
-</head>
+  <body>
+    <h2><i class="fa-solid fa-film" aria-hidden="true"></i> HLS Side Panel Pro</h2>
 
-<body>
-  <h2><i class="fa-solid fa-film" aria-hidden="true"></i> HLS Side Panel Pro</h2>
+    <label for="tabSelect">Website tab</label>
+    <select id="tabSelect">
+      <option value="">Loading browser tabs...</option>
+    </select>
 
-  <label for="tabSelect">Website tab</label>
-  <select id="tabSelect">
-    <option value="">Loading browser tabs...</option>
-  </select>
+    <button id="refreshTabs" class="icon-button">
+      <i class="fa-solid fa-rotate" aria-hidden="true"></i> Refresh tabs
+    </button>
+    <button id="scan">Grant access & scan selected tab</button>
 
-  <button id="refreshTabs" class="icon-button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> Refresh tabs</button>
-  <button id="scan">Grant access & scan selected tab</button>
+    <p id="status" role="status">Select your website tab, log in, and start the video.</p>
 
-  <p id="status" role="status">
-    Select your website tab, log in, and start the video.
-  </p>
-
-  <!-- Tab navigation -->
-  <div class="tab-nav" id="tabNav">
-    <button class="active" data-tab="streams"><i class="fa-solid fa-list" aria-hidden="true"></i> Streams</button>
-    <button data-tab="logs"><i class="fa-solid fa-terminal" aria-hidden="true"></i> Logs</button>
-  </div>
-
-  <!-- Tab content panels -->
-  <div class="tab-content active" id="tabStreams">
-    <h3>Detected playlists</h3>
-    <div id="streams"></div>
-
-    <section class="recording-panel" aria-label="HLS download analysis">
-      <h3 class="section-heading"><i class="fa-solid fa-microscope" aria-hidden="true"></i> Direct Download Analysis</h3>
-      <p class="hint">Inspect playlist structure, video/audio tracks, segment format, and key-response metadata before enabling direct downloading.</p>
-      <button id="analyzeHls" class="icon-button"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Analyze Selected HLS</button>
-      <div id="hlsAnalysisStatus" role="status" aria-live="polite" data-state="idle">Select a playlist, then run analysis.</div>
-      <pre id="hlsAnalysisDetails" class="analysis-details" hidden></pre>
-    </section>
-
-    <section class="recording-panel" aria-label="WebM recorder">
-      <h3 class="section-heading"><i class="fa-solid fa-circle-dot" aria-hidden="true"></i> WebM Recorder</h3>
-      <div id="recordingStatus" role="status" aria-live="polite" data-state="idle">
-        Inject the player and start playback first. Choose a file before each recording.
-      </div>
-      <div id="recordingTimer" aria-label="Recording duration">00:00</div>
-      <div class="recording-actions">
-        <button id="injectSitePlayer" class="icon-button"><i class="fa-solid fa-video" aria-hidden="true"></i> Inject Player</button>
-        <button id="startRecording" class="icon-button" disabled><i class="fa-solid fa-record-vinyl" aria-hidden="true"></i> Start Recording (Choose File)</button>
-        <button id="stopRecording" class="icon-button" disabled><i class="fa-solid fa-stop" aria-hidden="true"></i> Stop &amp; Download</button>
-        <button id="removeSitePlayer" class="icon-button" disabled><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Remove Player</button>
-      </div>
-      <p class="hint">For each website tab: select its playlist, click Inject Player, play the temporary video, then start recording. You can switch tabs and start other recordings; existing recordings continue independently. Each recording writes WebM chunks directly to the file you choose, reducing memory use for long videos. The file is finalized when you stop recording or the video ends. Keep this side panel open while recording; Chrome must remain running.</p>
-    </section>
-  </div>
-
-  <div class="tab-content" id="tabLogs">
-    <div class="section-heading"><i class="fa-solid fa-terminal" aria-hidden="true"></i> Extension operation logs</div>
-    <div id="logsArea">--- Logs not available until extension initializes ---</div>
-    <div class="recording-actions">
-      <button id="copyLogs" class="icon-button"><i class="fa-solid fa-copy" aria-hidden="true"></i> Copy all logs</button>
-      <button id="clearLogs" class="icon-button"><i class="fa-solid fa-trash-can" aria-hidden="true"></i> Clear logs</button>
+    <!-- Tab navigation -->
+    <div class="tab-nav" id="tabNav">
+      <button class="active" data-tab="streams">
+        <i class="fa-solid fa-list" aria-hidden="true"></i> Streams
+      </button>
+      <button data-tab="logs"><i class="fa-solid fa-terminal" aria-hidden="true"></i> Logs</button>
     </div>
-    <details class="diagnostics" id="advancedDiagnostics">
-      <summary><i class="fa-solid fa-stethoscope" aria-hidden="true"></i> Advanced Diagnostics</summary>
-      <p class="hint">Keep detailed HLS events, key-loading status, fragment metadata, and the FRAG_DECRYPTED probe. Media payload bytes are never copied by the probe.</p>
-      <button id="readLiveProbe" class="icon-button"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Read Live Probe</button>
-      <div id="advancedDiagnosticsActions" class="diagnostics-actions"></div>
-    </details>
-  </div>
 
-  <p class="hint">The player is injected into the selected website tab; this side panel does not embed a separate playback preview. The extension does not bypass login or DRM.</p>
-  <footer class="version-footer"><span>HLS Side Panel Pro</span><span id="extensionVersion">v—</span></footer>
+    <!-- Tab content panels -->
+    <div class="tab-content active" id="tabStreams">
+      <h3>Detected playlists</h3>
+      <div id="streams"></div>
 
-  <script type="module" src="sidepanel.js"></script>
-</body>
+      <section class="recording-panel" aria-label="HLS download analysis">
+        <h3 class="section-heading">
+          <i class="fa-solid fa-microscope" aria-hidden="true"></i> Direct Download Analysis
+        </h3>
+        <p class="hint">
+          Inspect playlist structure, video/audio tracks, segment format, and key-response metadata
+          before enabling direct downloading.
+        </p>
+        <button id="analyzeHls" class="icon-button">
+          <i class="fa-solid fa-list-check" aria-hidden="true"></i> Analyze Selected HLS
+        </button>
+        <div id="hlsAnalysisStatus" role="status" aria-live="polite" data-state="idle">
+          Select a playlist, then run analysis.
+        </div>
+        <pre id="hlsAnalysisDetails" class="analysis-details" hidden></pre>
+      </section>
+
+      <section class="recording-panel" aria-label="WebM recorder">
+        <h3 class="section-heading">
+          <i class="fa-solid fa-circle-dot" aria-hidden="true"></i> WebM Recorder
+        </h3>
+        <div class="segment-config">
+          <label for="segmentCount">Recording segments</label>
+          <div class="segment-config-controls">
+            <input id="segmentCount" type="range" min="1" max="10" step="1" value="1" />
+            <output id="segmentCountValue" for="segmentCount">1</output>
+            <button
+              id="applySegmentCount"
+              class="icon-button"
+              type="button"
+              title="Apply segment count"
+              aria-label="Apply segment count"
+            >
+              <i class="fa-solid fa-check" aria-hidden="true"></i>
+            </button>
+          </div>
+          <p id="segmentCountHint" class="hint">
+            Choose a count, then apply to prepare parallel VOD segment players.
+          </p>
+          <label class="segment-option" for="segmentQualityLock">
+            <input id="segmentQualityLock" type="checkbox" checked />
+            <span>Lock consistent quality during preparation</span>
+          </label>
+        </div>
+        <div id="segmentSummary" class="hint" role="status">Single-player recording mode.</div>
+        <div id="segmentList" class="segment-list" aria-live="polite"></div>
+        <div id="recordingStatus" role="status" aria-live="polite" data-state="idle">
+          Inject the player and start playback first. Choose a file before each recording.
+        </div>
+        <div id="recordingTimer" aria-label="Recording duration">00:00</div>
+        <div class="recording-actions">
+          <button id="injectSitePlayer" class="icon-button">
+            <i class="fa-solid fa-video" aria-hidden="true"></i> Inject Player
+          </button>
+          <button id="startRecording" class="icon-button" disabled>
+            <i class="fa-solid fa-record-vinyl" aria-hidden="true"></i> Start Recording (Choose
+            File)
+          </button>
+          <button id="stopRecording" class="icon-button" disabled>
+            <i class="fa-solid fa-stop" aria-hidden="true"></i> Stop &amp; Download
+          </button>
+          <button id="retrySegmentMerge" class="icon-button" hidden>
+            <i class="fa-solid fa-rotate" aria-hidden="true"></i> Retry Merge
+          </button>
+          <button id="removeSitePlayer" class="icon-button" disabled>
+            <i class="fa-solid fa-trash-can" aria-hidden="true"></i> Remove Player
+          </button>
+        </div>
+        <p class="hint">
+          For each website tab: select its playlist, click Inject Player, play the temporary video,
+          then start recording. You can switch tabs and start other recordings; existing recordings
+          continue independently. Each recording writes WebM chunks directly to the file you choose,
+          reducing memory use for long videos. The file is finalized when you stop recording or the
+          video ends. Keep this side panel open while recording; Chrome must remain running.
+        </p>
+      </section>
+    </div>
+
+    <div class="tab-content" id="tabLogs">
+      <div class="section-heading">
+        <i class="fa-solid fa-terminal" aria-hidden="true"></i> Extension operation logs
+      </div>
+      <div id="logsArea">--- Logs not available until extension initializes ---</div>
+      <div class="recording-actions">
+        <button id="copyLogs" class="icon-button">
+          <i class="fa-solid fa-copy" aria-hidden="true"></i> Copy all logs
+        </button>
+        <button id="clearLogs" class="icon-button">
+          <i class="fa-solid fa-trash-can" aria-hidden="true"></i> Clear logs
+        </button>
+      </div>
+      <details class="diagnostics" id="advancedDiagnostics">
+        <summary>
+          <i class="fa-solid fa-stethoscope" aria-hidden="true"></i> Advanced Diagnostics
+        </summary>
+        <p class="hint">
+          Keep detailed HLS events, key-loading status, fragment metadata, and the FRAG_DECRYPTED
+          probe. Media payload bytes are never copied by the probe.
+        </p>
+        <button id="readLiveProbe" class="icon-button">
+          <i class="fa-solid fa-wave-square" aria-hidden="true"></i> Read Live Probe
+        </button>
+        <div id="advancedDiagnosticsActions" class="diagnostics-actions"></div>
+      </details>
+    </div>
+
+    <p class="hint">
+      The player is injected into the selected website tab; this side panel does not embed a
+      separate playback preview. The extension does not bypass login or DRM.
+    </p>
+    <footer class="version-footer">
+      <span>HLS Side Panel Pro</span><span id="extensionVersion">v—</span>
+    </footer>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
 </html>

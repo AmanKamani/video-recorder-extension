@@ -4,7 +4,7 @@
   "description": "Chrome MV3 HLS Side Panel Pro extension using native ES modules.",
   "main": "background.js",
   "scripts": {
-    "test": "node --check background.js && node --check sidepanel.js && node --check modules/hls-analysis.js && node --check modules/logger.js && node --check modules/recorder.js && node --check modules/url-utils.js && node --check modules/webm-repair.js",
+    "test": "node --test tests/*.test.js && node --check background.js && node --check sidepanel.js && node --check modules/*.js",
     "prepare": "husky"
   },
   "lint-staged": {

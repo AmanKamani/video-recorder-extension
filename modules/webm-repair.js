@@ -3,131 +3,19 @@
  * Adds duration metadata and seek cues after MediaRecorder has finished writing.
  * All file reads are bounded; this module does not load the entire video into RAM.
  */
-const WEBM_REPAIR_READ_CACHE = 4 * 1024 * 1024;
-const WEBM_REPAIR_COPY_CHUNK = 8 * 1024 * 1024;
+import { SEGMENT_CONFIG } from "./config.js";
+import {
+  WebmBlobReader,
+  webmConcat,
+  webmElement,
+  webmEncodeSize,
+  webmEncodeUint,
+  webmReadElement,
+  webmReadUint,
+  webmReadVint,
+} from "./webm-ebml.js";
 
-class WebmBlobReader {
-  // Retains the source Blob and initializes a small sliding read cache.
-  constructor(blob) {
-    this.blob = blob;
-    this.cacheStart = -1;
-    this.cache = new Uint8Array(0);
-  }
-  // Returns a requested byte range, loading only a bounded slice of the source file when needed.
-  async bytes(offset, length) {
-    if (offset < 0 || length < 0 || offset + length > this.blob.size)
-      throw new Error("Unexpected end of WebM file.");
-    if (this.cacheStart <= offset && offset + length <= this.cacheStart + this.cache.length) {
-      return this.cache.subarray(offset - this.cacheStart, offset - this.cacheStart + length);
-    }
-    const start = Math.floor(offset / WEBM_REPAIR_READ_CACHE) * WEBM_REPAIR_READ_CACHE;
-    const end = Math.min(this.blob.size, Math.max(start + WEBM_REPAIR_READ_CACHE, offset + length));
-    this.cache = new Uint8Array(await this.blob.slice(start, end).arrayBuffer());
-    this.cacheStart = start;
-    if (offset + length > this.cacheStart + this.cache.length) return this.bytes(offset, length);
-    return this.cache.subarray(offset - this.cacheStart, offset - this.cacheStart + length);
-  }
-}
-
-/** Decodes an EBML variable-length integer from the requested file offset. */
-async function webmReadVint(reader, offset, isId = false) {
-  const first = (await reader.bytes(offset, 1))[0];
-  if (!first) throw new Error("Invalid EBML variable integer.");
-  let mask = 0x80,
-    length = 1;
-  while (!(first & mask)) {
-    mask >>= 1;
-    length++;
-    if (length > (isId ? 4 : 8)) throw new Error("Invalid EBML variable integer length.");
-  }
-  const raw = await reader.bytes(offset, length);
-  let value = BigInt(isId ? raw[0] : raw[0] & (mask - 1));
-  for (let i = 1; i < length; i++) value = (value << 8n) | BigInt(raw[i]);
-  const unknown = !isId && value === (1n << BigInt(7 * length)) - 1n;
-  return { value, length, unknown };
-}
-
-/** Reads an EBML element header and calculates the element’s payload and end offsets. */
-async function webmReadElement(reader, offset, parentEnd) {
-  const id = await webmReadVint(reader, offset, true);
-  const size = await webmReadVint(reader, offset + id.length, false);
-  const dataStart = offset + id.length + size.length;
-  const end = size.unknown ? parentEnd : dataStart + Number(size.value);
-  if (end < dataStart || end > parentEnd) throw new Error("Invalid EBML element bounds.");
-  return {
-    id: id.value,
-    offset,
-    idLength: id.length,
-    sizeOffset: offset + id.length,
-    sizeLength: size.length,
-    sizeValue: size.value,
-    unknownSize: size.unknown,
-    dataStart,
-    end,
-  };
-}
-
-/** Reads an EBML unsigned integer payload as a BigInt. */
-async function webmReadUint(reader, element) {
-  const length = element.end - element.dataStart;
-  if (length < 1 || length > 8) throw new Error("Invalid EBML integer element.");
-  const bytes = await reader.bytes(element.dataStart, length);
-  let value = 0n;
-  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
-  return value;
-}
-
-/** Encodes an EBML element size using a valid variable-length integer representation. */
-function webmEncodeSize(value, requestedLength = 0) {
-  const n = BigInt(value);
-  let length = requestedLength;
-  if (!length) {
-    for (length = 1; length <= 8; length++) {
-      if (n < (1n << BigInt(7 * length)) - 1n) break;
-    }
-  }
-  if (length < 1 || length > 8 || n >= (1n << BigInt(7 * length)) - 1n)
-    throw new Error("EBML element size is too large for its existing header.");
-  let v = n;
-  const out = new Uint8Array(length);
-  for (let i = length - 1; i >= 0; i--) {
-    out[i] = Number(v & 255n);
-    v >>= 8n;
-  }
-  out[0] |= 1 << (8 - length);
-  return out;
-}
-
-/** Encodes an unsigned integer into the smallest suitable big-endian byte sequence. */
-function webmEncodeUint(value) {
-  let n = BigInt(value);
-  let length = 1;
-  while (n >= 1n << BigInt(8 * length)) length++;
-  const out = new Uint8Array(length);
-  for (let i = length - 1; i >= 0; i--) {
-    out[i] = Number(n & 255n);
-    n >>= 8n;
-  }
-  return out;
-}
-
-/** Combines byte arrays into one contiguous byte array. */
-function webmConcat(parts) {
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-/** Builds a complete EBML element from its hexadecimal ID and payload bytes. */
-function webmElement(idHex, payload) {
-  const id = new Uint8Array(idHex.match(/../g).map((part) => parseInt(part, 16)));
-  return webmConcat([id, webmEncodeSize(payload.length), payload]);
-}
+const WEBM_REPAIR_COPY_CHUNK = SEGMENT_CONFIG.webmCopyChunkBytes;
 
 /** Builds the WebM Duration element for the supplied duration in timecode ticks. */
 function webmMakeDurationElement(durationTicks) {
@@ -222,6 +110,7 @@ async function repairWebmFile(fileHandle, durationMs, log = () => {}) {
   let infoReplacement = null;
   let insertionDelta = 0;
   if (durationElement) {
+    // Preserve the existing Info layout when Duration can be updated in place.
     const size = durationElement.end - durationElement.dataStart;
     if (size !== 4 && size !== 8)
       return {
@@ -259,6 +148,7 @@ async function repairWebmFile(fileHandle, durationMs, log = () => {}) {
     const newPayload = webmConcat([payload, webmMakeDurationElement(durationTicks)]);
     const newSize = webmEncodeSize(newPayload.length);
     const newInfoBytes = webmConcat([idBytes, newSize, newPayload]);
+    // Growing Info shifts every following Cluster, so cue positions include this delta.
     infoReplacement = newInfoBytes;
     insertionDelta = newInfoBytes.length - oldInfoBytes.length;
   }
@@ -290,6 +180,7 @@ async function repairWebmFile(fileHandle, durationMs, log = () => {}) {
     }
 
     childOffset = segment.dataStart;
+    // Build one seek point per Cluster from its first keyframe on the selected video track.
     while (childOffset < segment.end) {
       const element = await webmReadElement(reader, childOffset, segment.end);
       if (element.id === 0x1f43b675n) {
@@ -346,6 +237,7 @@ async function repairWebmFile(fileHandle, durationMs, log = () => {}) {
   try {
     if (infoReplacement) {
       await writable.truncate(finalSize);
+      // Copy backward in bounded chunks so the inserted metadata cannot overwrite unread bytes.
       let cursor = originalFile.size;
       while (cursor > info.end) {
         const start = Math.max(info.end, cursor - WEBM_REPAIR_COPY_CHUNK);
@@ -360,6 +252,7 @@ async function repairWebmFile(fileHandle, durationMs, log = () => {}) {
       await writable.truncate(finalSize);
     }
     if (segmentSizeBytes) {
+      // Finite Segments must account for both the expanded Info element and appended Cues.
       await writable.seek(segment.sizeOffset);
       await writable.write(segmentSizeBytes);
     }

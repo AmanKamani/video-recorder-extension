@@ -1,3 +1,5 @@
+import { toSegmentPanelMessage } from "./modules/segment-message-routing.js";
+
 // Initializes extension behavior when Chrome installs or updates the extension.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
@@ -5,8 +7,49 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
 
+const notifiedSegmentJobs = new Set();
+
 // Handles messages from the recorder bridge, including recording completion and user notifications.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Relay segmented page events through the service worker so the side panel remains the job owner.
+  const segmentPanelMessage = toSegmentPanelMessage(message);
+  if (segmentPanelMessage) {
+    chrome.runtime
+      .sendMessage(segmentPanelMessage)
+      .then((response) => sendResponse(response || { ok: true }))
+      .catch((error) =>
+        sendResponse({
+          ok: false,
+          message: error?.message || "Could not reach the segmented recorder side panel.",
+        }),
+      );
+    return true;
+  }
+
+  if (message?.type === "HLS_SIDEPANEL_SEGMENT_FINALIZED") {
+    const detail = message.detail || {};
+    // Finalization may be retried across extension contexts; notify only once per job.
+    if (!detail.jobId || notifiedSegmentJobs.has(detail.jobId)) {
+      sendResponse({ ok: true, duplicate: true });
+      return;
+    }
+    notifiedSegmentJobs.add(detail.jobId);
+    chrome.notifications
+      .create(`hls-segmented-${detail.jobId}`, {
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icon.png"),
+        title: detail.ok === false ? "Segmented WebM recording issue" : "Segmented WebM saved",
+        message:
+          detail.ok === false
+            ? detail.message || "The segmented recording could not be finalized."
+            : `${detail.pageTitle || "Website tab"}: ${detail.filename || "WebM recording"} saved after all segments finished`,
+        priority: 1,
+      })
+      .then(() => sendResponse({ ok: detail.ok !== false }))
+      .catch((error) => sendResponse({ ok: false, message: error?.message || String(error) }));
+    return true;
+  }
+
   if (message?.type === "HLS_SIDEPANEL_RECORDING_CHUNK") {
     chrome.runtime
       .sendMessage({

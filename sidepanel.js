@@ -3,6 +3,9 @@ import { createRecorderController } from "./modules/recorder.js";
 import { repairWebmFile } from "./modules/webm-repair.js";
 import { registerHlsAnalysis } from "./modules/hls-analysis.js";
 import { isHttpUrl, isM3u8 } from "./modules/url-utils.js";
+import { createSegmentedRecorderController } from "./modules/segmented-recorder.js";
+import { createSegmentUi, getSegmentedTimerText } from "./modules/segment-ui.js";
+import { createJobHistory } from "./modules/job-history.js";
 
 // Main side-panel coordinator: wires UI events to focused feature modules.
 const tabSelect = document.getElementById("tabSelect");
@@ -18,8 +21,13 @@ const addLog = logger.add;
 // The recorder module owns per-tab sessions, file writing, finalization, and its
 // controls. These small wrappers let tab/player coordination request status updates.
 let recorderController = null;
+let segmentedController = null;
+let segmentUi = null;
 /** Keeps the recording buttons aligned with the selected tab and its current player/recorder state. */
 function syncRecorderControls() {
+  if (segmentUi?.isSegmented()) {
+    return segmentedController?.syncSelectedTab() || Promise.resolve();
+  }
   return recorderController ? recorderController.syncRecorderControls() : Promise.resolve();
 }
 /** Updates the recorder status message and visual state. */
@@ -44,6 +52,31 @@ let selectedButton = null;
 let selectedPlaylistTabId = null;
 let tabRefreshGeneration = 0;
 let followActiveTab = true;
+let segmentedPreparationGeneration = 0;
+const recordingModeByTab = new Map();
+
+/** Returns the currently selected playlist URL, if it still belongs to the selected tab. */
+function getSelectedPlaylist() {
+  const selectedTabId = Number(tabSelect.value);
+  if (
+    !selectedButton ||
+    selectedPlaylistTabId !== selectedTabId ||
+    selectedButton.dataset.tabId !== String(selectedTabId)
+  ) {
+    return null;
+  }
+  return selectedButton.dataset.playlistUrl || selectedButton.textContent?.trim() || null;
+}
+
+/** Restores the selected tab's recorder mode so jobs in other tabs remain reachable. */
+function restoreRecordingModeForSelectedTab() {
+  if (!segmentUi) return;
+  const tabId = Number(tabSelect.value);
+  const segmentedJob = segmentedController?.getJobForTab(tabId);
+  const count = segmentedJob?.segments?.length || recordingModeByTab.get(tabId) || 1;
+  segmentUi.setMode(count);
+  recordingModeByTab.set(tabId, segmentUi.getCount());
+}
 
 /** Updates the main status line and records the same message in the operation log. */
 function setStatus(message) {
@@ -121,6 +154,7 @@ async function refreshTabs(preferredTabId = null) {
     if (previousId !== tabSelect.value || preferredTabId !== null) {
       setStatus(`Selected Tab ${tabSelect.value}. Scan this tab to discover its playlists.`);
     }
+    restoreRecordingModeForSelectedTab();
     await syncRecorderControls();
   } catch (error) {
     if (refreshGeneration === tabRefreshGeneration) {
@@ -215,6 +249,212 @@ recorderController = createRecorderController({
   addLog,
   setStatus,
   repairWebmFile,
+});
+
+const segmentHistory = createJobHistory();
+const segmentedStartButton = document.getElementById("startRecording");
+const segmentedStopButton = document.getElementById("stopRecording");
+const segmentedRemoveButton = document.getElementById("removeSitePlayer");
+const segmentedTimerEl = document.getElementById("recordingTimer");
+const segmentedRetryMergeButton = document.getElementById("retrySegmentMerge");
+const QUALITY_LOCK_STORAGE_KEY = "segmentedQualityLockEnabled";
+
+/** Mirrors a segmented job snapshot into the sidebar controls for the selected tab. */
+function renderSegmentedJob(job) {
+  if (!segmentUi) return;
+  if (job && Number(tabSelect.value) !== job.tabId) return;
+  if (job && segmentUi.getCount() !== job.segments.length) {
+    segmentUi.setMode(job.segments.length);
+  }
+  if (job) recordingModeByTab.set(job.tabId, job.segments.length);
+  if (!segmentUi.isSegmented()) return;
+  segmentUi.renderJob(job);
+  segmentedTimerEl.textContent = getSegmentedTimerText(job);
+  const state = job?.state || "idle";
+  segmentedStartButton.disabled = state !== "ready";
+  segmentedStopButton.disabled = state !== "recording";
+  segmentedRemoveButton.disabled = ["recording", "merging", "repairing"].includes(state);
+  segmentedRetryMergeButton.hidden = state !== "merge_failed";
+  segmentedRetryMergeButton.disabled = state !== "merge_failed";
+  segmentUi.setBusy(["recording", "merging", "repairing"].includes(state));
+  if (state === "ready") {
+    setRecordingStatus("All segment players are ready. Start all segments when ready.", "success");
+  } else if (state === "recording") {
+    setRecordingStatus("All segments are recording in parallel.", "recording");
+  } else if (state === "merging") {
+    setRecordingStatus("All segments finished. Merging the WebM container…", "working");
+  } else if (state === "repairing") {
+    setRecordingStatus("Updating duration and seek metadata…", "working");
+  } else if (state === "completed") {
+    setRecordingStatus(`Merged recording saved as ${job.filename}.`, "success");
+  } else if (state === "retryable") {
+    setRecordingStatus(
+      job.error?.message || "Retry each marked segment using its refresh button.",
+      "error",
+    );
+  } else if (state === "merge_failed") {
+    setRecordingStatus(
+      job.error?.message || "Merge failed. Retry using the existing files.",
+      "error",
+    );
+  } else if (state === "failed" || state === "cancelled") {
+    setRecordingStatus(job.error?.message || `Segmented recording ${state}.`, "error");
+  }
+}
+
+/** Automatically prepares parallel page players for the selected playlist and tab. */
+async function prepareSegmentedMode(
+  count = segmentUi?.getCount(),
+  lockQuality = segmentUi?.isQualityLockEnabled(),
+) {
+  if (!segmentUi || count <= 1) return;
+  const generation = ++segmentedPreparationGeneration;
+  segmentUi.setBusy(true);
+  segmentedStartButton.disabled = true;
+  segmentedStopButton.disabled = true;
+  setRecordingStatus(`Preparing ${count} parallel segment players…`, "working");
+  try {
+    const job = await segmentedController.prepareSelectedTab(count, { lockQuality });
+    if (generation !== segmentedPreparationGeneration) return;
+    renderSegmentedJob(job);
+    setStatus(`Prepared ${count} parallel VOD segments in Tab ${job.tabId}.`);
+  } catch (error) {
+    if (generation !== segmentedPreparationGeneration) return;
+    segmentUi.renderJob(null);
+    setRecordingStatus(error?.message || String(error), "error");
+    addLog("error", `Could not prepare segmented recording: ${error?.message || error}`);
+  } finally {
+    if (generation === segmentedPreparationGeneration) segmentUi.setBusy(false);
+  }
+}
+
+segmentUi = createSegmentUi({
+  onApply: async (count, lockQuality) => {
+    const tabId = Number(tabSelect.value);
+    if (Number.isInteger(tabId) && tabId > 0) recordingModeByTab.set(tabId, count);
+    if (count === 1) {
+      ++segmentedPreparationGeneration;
+      try {
+        await segmentedController?.cleanupSelectedTab();
+      } catch (_) {}
+      await recorderController.syncRecorderControls();
+      return;
+    }
+    await prepareSegmentedMode(count, lockQuality);
+  },
+  onQualityLockChange: (enabled) => {
+    chrome.storage.local
+      .set({ [QUALITY_LOCK_STORAGE_KEY]: enabled })
+      .catch((error) =>
+        addLog("warning", `Could not save quality-lock preference: ${error?.message || error}`),
+      );
+  },
+  onRetrySegment: async (segmentId) => {
+    try {
+      setRecordingStatus("Retrying the selected segment…", "working");
+      await segmentedController.retrySegment(segmentId);
+    } catch (error) {
+      setRecordingStatus(error?.message || String(error), "error");
+      renderSegmentedJob(segmentedController.getJobForTab(Number(tabSelect.value)));
+    }
+  },
+});
+
+chrome.storage.local
+  .get(QUALITY_LOCK_STORAGE_KEY)
+  .then((stored) => segmentUi.setQualityLockEnabled(stored[QUALITY_LOCK_STORAGE_KEY]))
+  .catch((error) =>
+    addLog("warning", `Could not restore quality-lock preference: ${error?.message || error}`),
+  );
+
+segmentedController = createSegmentedRecorderController({
+  tabSelect,
+  getSelectedTab,
+  ensurePagePermission,
+  getSelectedPlaylist,
+  isM3u8,
+  addLog,
+  setStatus,
+  repairWebmFile,
+  history: segmentHistory,
+  onJobUpdate: renderSegmentedJob,
+});
+
+// Keep elapsed wall time fluid between the less frequent segmented-job state updates.
+setInterval(() => {
+  if (!segmentUi.isSegmented()) return;
+  const job = segmentedController.getJobForTab(Number(tabSelect.value));
+  segmentedTimerEl.textContent = getSegmentedTimerText(job);
+}, 250);
+
+segmentHistory
+  .list()
+  .then((entries) => {
+    for (const entry of entries) {
+      addLog(
+        entry.state === "completed" ? "info" : "warning",
+        `Previous segmented job ${entry.jobId}: ${entry.state}${entry.error ? ` — ${entry.error}` : ""}`,
+      );
+    }
+  })
+  .catch(() => {});
+
+segmentedStartButton.addEventListener("click", async () => {
+  if (!segmentUi.isSegmented()) return;
+  segmentUi.setBusy(true);
+  segmentedStartButton.disabled = true;
+  setRecordingStatus("Choose the final merged WebM file…", "working");
+  try {
+    const job = await segmentedController.startSelectedJob();
+    renderSegmentedJob(job);
+  } catch (error) {
+    const cancelled = error?.name === "AbortError";
+    setRecordingStatus(
+      cancelled
+        ? "Save dialog cancelled; recording was not started."
+        : error?.message || String(error),
+      cancelled ? "idle" : "error",
+    );
+  } finally {
+    const currentJob = segmentedController.getJobForTab(Number(tabSelect.value));
+    renderSegmentedJob(currentJob);
+    segmentUi.setBusy(["recording", "merging", "repairing"].includes(currentJob?.state));
+  }
+});
+
+segmentedStopButton.addEventListener("click", async () => {
+  if (!segmentUi.isSegmented()) return;
+  try {
+    setRecordingStatus("Stopping the complete segmented job…", "working");
+    const result = await segmentedController.stopSelectedJob();
+    if (!result.ok) throw new Error(result.message);
+  } catch (error) {
+    setRecordingStatus(error?.message || String(error), "error");
+  }
+});
+
+segmentedRetryMergeButton.addEventListener("click", async () => {
+  try {
+    segmentedRetryMergeButton.disabled = true;
+    setRecordingStatus("Retrying merge using the completed segment files…", "working");
+    await segmentedController.retryMergeSelectedJob();
+  } catch (error) {
+    setRecordingStatus(error?.message || String(error), "error");
+  } finally {
+    renderSegmentedJob(segmentedController.getJobForTab(Number(tabSelect.value)));
+  }
+});
+
+segmentedRemoveButton.addEventListener("click", async () => {
+  if (!segmentUi.isSegmented()) return;
+  try {
+    const result = await segmentedController.cleanupSelectedTab();
+    if (!result.ok) throw new Error(result.message);
+    segmentUi.reset();
+    setRecordingStatus(result.message, "idle");
+  } catch (error) {
+    setRecordingStatus(error?.message || String(error), "error");
+  }
 });
 
 // Scan only the selected tab, and discard results if the selection changes mid-scan.
@@ -314,7 +554,9 @@ async function scanSelectedTab() {
         selectedPlaylistTabId = tab.id;
         button.classList.add("selected");
         setStatus(
-          "Playlist selected for this tab. Use Analyze Selected HLS or WebM Recorder > Inject Player.",
+          segmentUi?.isSegmented()
+            ? "Playlist selected. Apply the segment count to create the parallel players."
+            : "Playlist selected for this tab. Use Analyze Selected HLS or WebM Recorder > Inject Player.",
         );
       });
 
@@ -795,6 +1037,7 @@ tabSelect.addEventListener("change", () => {
   selectedButton = null;
   selectedPlaylistTabId = null;
   streamsEl.replaceChildren();
+  restoreRecordingModeForSelectedTab();
   syncRecorderControls();
 });
 // Reconciles recorder controls after a manual tab-list refresh.
@@ -816,10 +1059,21 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 // Refresh labels when a page title or URL changes, without changing the current
 // selection. Include a removed-tab refresh so stale entries disappear promptly.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    segmentedController
+      ?.handleTabUnavailable(tabId, "The website navigated before the segmented job completed.")
+      .catch(() => {});
+  }
   if (changeInfo.title || changeInfo.url) refreshTabs();
 });
 // Refreshes the selector after a browser tab is closed.
-chrome.tabs.onRemoved.addListener(() => refreshTabs());
+chrome.tabs.onRemoved.addListener((tabId) => {
+  recordingModeByTab.delete(tabId);
+  segmentedController
+    ?.handleTabUnavailable(tabId, "The website tab closed before the segmented job completed.")
+    .catch(() => {});
+  refreshTabs();
+});
 
 // Read the extension version from the manifest so the footer cannot drift from package metadata.
 const versionEl = document.getElementById("extensionVersion");
