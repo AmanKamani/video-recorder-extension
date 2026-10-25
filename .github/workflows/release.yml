@@ -149,7 +149,7 @@ jobs:
             "${ZIP_PATH}"
             --repo "${GITHUB_REPOSITORY}"
             --target "${TARGET_SHA}"
-            --title "HLS Side Panel Pro ${TAG_NAME}"
+            --title "${TAG_NAME}"
             --generate-notes
           )
 
