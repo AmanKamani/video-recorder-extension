@@ -6,6 +6,26 @@ import { canRetrySegment } from "./segment-job-state.js";
 const labelState = (state) =>
   String(state || "preparing").replace(/^\w/, (letter) => letter.toUpperCase());
 
+/** Describes the canonical decoded lock and notes differing manifest dimensions. */
+const formatQualityLock = (job) => {
+  if (!job?.quality?.locked) return "";
+  const canonical = job.quality;
+  const advertised = job.segments?.[0]?.quality || {};
+  const actualWidth = Number(canonical.decodedWidth);
+  const actualHeight = Number(canonical.decodedHeight);
+  const advertisedWidth = Number(advertised.width);
+  const advertisedHeight = Number(advertised.height);
+  if (actualWidth > 0 && actualHeight > 0) {
+    const actual = `${actualWidth}×${actualHeight} locked`;
+    const differs =
+      advertisedWidth > 0 &&
+      advertisedHeight > 0 &&
+      (advertisedWidth !== actualWidth || advertisedHeight !== actualHeight);
+    return differs ? `${actual} (advertised ${advertisedWidth}×${advertisedHeight})` : actual;
+  }
+  return `${canonical.targetHeight}p locked`;
+};
+
 /** Normalizes a segment slider value to a supported whole number. */
 export function normalizeSegmentCount(value) {
   return Math.max(
@@ -24,6 +44,11 @@ export function getSegmentedTimerText(job, now = Date.now()) {
   if (!job?.startedAt) return "00:00";
   const end = job.recordingEndedAt || (job.state === "recording" ? now : job.startedAt);
   return formatMediaTime(Math.max(0, end - job.startedAt) / 1000);
+}
+
+/** Reports whether the selected tab's segmented job must lock configuration controls. */
+export function isSegmentJobBusy(job) {
+  return ["recording", "merging", "repairing"].includes(job?.state);
 }
 
 /** Converts a controller snapshot into safe, display-only segment rows. */
@@ -127,8 +152,9 @@ export function createSegmentUi({
           : "Single-player recording mode.";
       return;
     }
+    const qualityLock = formatQualityLock(job);
     summary.textContent = `${job.segments.length} segments · ${labelState(job.state)}${
-      job.quality?.locked ? ` · ${job.quality.targetHeight}p locked` : ""
+      qualityLock ? ` · ${qualityLock}` : ""
     }`;
     const items = buildSegmentRenderModel(job);
     const activeIds = new Set(items.map((item) => item.id));

@@ -96,12 +96,13 @@ export function selectLevelForHeight(levels, targetHeight) {
   return selectedIndex;
 }
 
-/** Accepts small codec-padding differences while rejecting a different rendition. */
+/** Compares decoded dimensions, optionally letting the canonical player establish actual width. */
 export function matchesLockedQualityDimensions(
   videoWidth,
   videoHeight,
   quality,
   tolerancePixels = 0,
+  compareWidth = true,
 ) {
   const actualWidth = Number(videoWidth);
   const actualHeight = Number(videoHeight);
@@ -110,7 +111,7 @@ export function matchesLockedQualityDimensions(
   const tolerance = Math.max(0, Number(tolerancePixels) || 0);
   if (!(actualHeight > 0)) return false;
   if (expectedHeight > 0 && Math.abs(actualHeight - expectedHeight) > tolerance) return false;
-  if (expectedWidth > 0) {
+  if (compareWidth && expectedWidth > 0) {
     if (!(actualWidth > 0) || Math.abs(actualWidth - expectedWidth) > tolerance) return false;
   }
   return true;
@@ -412,6 +413,7 @@ export async function segmentedPageCommand(command, options = {}) {
       mimeType: null,
       unloadHandler: null,
       minimized: false,
+      preparationError: null,
     };
     window[GLOBAL_KEY] = job;
 
@@ -566,10 +568,16 @@ export async function segmentedPageCommand(command, options = {}) {
           const error = data.details || data.type || "Fatal HLS error";
           segment.error = error;
           if (typeof job.onFatalError === "function") job.onFatalError(segment, new Error(error));
-          else if (typeof segment.rejectPreparation === "function") {
-            segment.rejectPreparation(new Error(error));
+          else {
+            job.preparationError ||= { segment, error: new Error(error) };
+            if (typeof segment.rejectPreparation === "function") {
+              segment.rejectPreparation(new Error(error));
+            }
           }
         }
+      });
+      hls.on(HlsConstructor.Events.LEVEL_SWITCHED, (_, data) => {
+        segment.loadedLevel = Number.isInteger(data?.level) ? data.level : null;
       });
       hls.on(HlsConstructor.Events.MEDIA_ATTACHED, () => hls.loadSource(playlistUrl));
       hls.attachMedia(segment.video);
@@ -633,19 +641,22 @@ export async function segmentedPageCommand(command, options = {}) {
       segment.quality = quality;
       return quality;
     };
-    /** Waits until HLS selection and decoded dimensions both reflect the locked rendition. */
-    const waitForLockedQuality = async (segment, quality, seekTime) => {
+    /**
+     * Waits for the selected HLS level and decoded dimensions. The first segment
+     * trusts only advertised height; later segments match its canonical decoded size.
+     */
+    const waitForLockedQuality = async (segment, quality, seekTime, canonicalDimensions = null) => {
       if (!quality) return;
       /** Verifies decoded dimensions against the selected rendition within tolerance. */
       const dimensionsMatch = () => {
         const actualWidth = Number(segment.video.videoWidth);
         const actualHeight = Number(segment.video.videoHeight);
-        const expectedWidth = Number(quality.width);
-        const expectedHeight = Number(quality.height);
+        const expectedWidth = Number(canonicalDimensions?.width);
+        const expectedHeight = Number(canonicalDimensions?.height || quality.height);
         const tolerance = Math.max(0, Number(qualityDimensionTolerancePixels) || 0);
         if (!(actualHeight > 0)) return false;
         if (expectedHeight > 0 && Math.abs(actualHeight - expectedHeight) > tolerance) return false;
-        if (expectedWidth > 0) {
+        if (canonicalDimensions && expectedWidth > 0) {
           if (!(actualWidth > 0) || Math.abs(actualWidth - expectedWidth) > tolerance) return false;
         }
         return true;
@@ -669,9 +680,7 @@ export async function segmentedPageCommand(command, options = {}) {
               reject(new Error(segment.error));
               return;
             }
-            const correctLevel =
-              segment.hls.currentLevel === quality.levelIndex ||
-              segment.hls.loadLevel === quality.levelIndex;
+            const correctLevel = segment.loadedLevel === quality.levelIndex;
             if (correctLevel && dimensionsMatch() && segment.video.readyState >= 2) {
               clearInterval(interval);
               resolve();
@@ -685,7 +694,11 @@ export async function segmentedPageCommand(command, options = {}) {
                     segment.hls.currentLevel
                   }, load level ${segment.hls.loadLevel}, decoded ${Number(
                     segment.video.videoWidth,
-                  )}x${Number(segment.video.videoHeight)}).`,
+                  )}x${Number(segment.video.videoHeight)}${
+                    canonicalDimensions
+                      ? `, expected canonical ${canonicalDimensions.width}x${canonicalDimensions.height}`
+                      : ""
+                  }).`,
                 ),
               );
             }
@@ -757,8 +770,10 @@ export async function segmentedPageCommand(command, options = {}) {
           startTime: item.startTime,
           endTime: item.endTime,
           lockedLevel: item.quality?.levelIndex ?? null,
-          width: item.quality?.width ?? null,
-          height: item.quality?.height ?? null,
+          width: item.quality?.decodedWidth ?? item.quality?.width ?? null,
+          height: item.quality?.decodedHeight ?? item.quality?.height ?? null,
+          advertisedWidth: item.quality?.width ?? null,
+          advertisedHeight: item.quality?.height ?? null,
           bitrate: item.quality?.bitrate ?? null,
         })),
       };
@@ -810,26 +825,45 @@ export async function segmentedPageCommand(command, options = {}) {
         segment.duration = segment.endTime - segment.startTime;
         segment.rangeEl.textContent = `${segment.startTime.toFixed(2)}s → ${segment.endTime.toFixed(2)}s`;
       }
-      await Promise.all(
-        job.segments.map(async (segment) => {
-          await waitForReady(segment);
-          const quality = lockSegmentQuality(segment, targetHeight);
-          await waitForReady(segment, segment.startTime);
-          await waitForLockedQuality(segment, quality, segment.startTime);
-          if (segment.error) throw new Error(segment.error);
-          segment.video.pause();
-          setSegmentUi(segment, "ready", 0);
-          emit("segment-status", {
-            jobId,
-            segmentId: segment.id,
-            state: "ready",
-            startTime: segment.startTime,
-            endTime: segment.endTime,
-            duration: segment.duration,
-            progress: 0,
-          });
-        }),
-      );
+      /** Prepares one player and records the dimensions actually decoded by Chrome. */
+      const prepareSegment = async (segment, canonicalDimensions = null) => {
+        await waitForReady(segment);
+        const quality = lockSegmentQuality(segment, targetHeight);
+        await waitForReady(segment, segment.startTime);
+        await waitForLockedQuality(segment, quality, segment.startTime, canonicalDimensions);
+        if (segment.error) throw new Error(segment.error);
+        if (quality) {
+          quality.decodedWidth = Number(segment.video.videoWidth) || null;
+          quality.decodedHeight = Number(segment.video.videoHeight) || null;
+        }
+        segment.video.pause();
+        setSegmentUi(segment, "ready", 0);
+        emit("segment-status", {
+          jobId,
+          segmentId: segment.id,
+          state: "ready",
+          startTime: segment.startTime,
+          endTime: segment.endTime,
+          duration: segment.duration,
+          progress: 0,
+        });
+      };
+      if (lockQuality) {
+        // The first decoded player is authoritative when manifest width metadata is inaccurate.
+        await prepareSegment(job.segments[0]);
+        const canonicalDimensions = {
+          width: Number(job.segments[0].video.videoWidth) || null,
+          height: Number(job.segments[0].video.videoHeight) || targetHeight,
+        };
+        job.quality.decodedWidth = canonicalDimensions.width;
+        job.quality.decodedHeight = canonicalDimensions.height;
+        await Promise.all(
+          job.segments.slice(1).map((segment) => prepareSegment(segment, canonicalDimensions)),
+        );
+      } else {
+        await Promise.all(job.segments.map((segment) => prepareSegment(segment)));
+      }
+      if (job.preparationError) throw job.preparationError.error;
       job.streamMetadata = collectStreamMetadata(job.segments[0]);
       job.state = "ready";
       /** Fails a prepared job when HLS reports a fatal error before recording starts. */

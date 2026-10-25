@@ -70,6 +70,18 @@ test("accepts codec padding near the locked rendition but rejects another qualit
   assert.equal(matchesLockedQualityDimensions(0, 0, quality, 4), false);
 });
 
+test("allows the canonical segment to replace an inaccurate advertised width", () => {
+  const matches = segmentedPageRuntime.matchesLockedQualityDimensions;
+  const advertised = { width: 1280, height: 720 };
+
+  assert.equal(matches(1152, 720, advertised, 4, false), true);
+  assert.equal(matches(1152, 720, advertised, 4, true), false);
+
+  const canonicalDecoded = { width: 1152, height: 720 };
+  assert.equal(matches(1152, 720, canonicalDecoded, 4, true), true);
+  assert.equal(matches(1280, 720, canonicalDecoded, 4, true), false);
+});
+
 test("builds three contiguous one-minute ranges for temporary merge testing", () => {
   assert.deepEqual(calculateFixedTestRanges(7200, 3, 60), [
     { id: "segment-1", index: 0, startTime: 0, endTime: 60, duration: 60 },
