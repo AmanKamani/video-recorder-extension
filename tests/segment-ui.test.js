@@ -34,6 +34,15 @@ test("shows running wall time and freezes it after segmented recording ends", ()
   assert.equal(getSegmentedTimerText({ state: "ready" }, 90_000), "00:00");
 });
 
+test("derives busy controls from the selected tab's own segmented job", () => {
+  assert.equal(typeof segmentUi.isSegmentJobBusy, "function");
+  assert.equal(segmentUi.isSegmentJobBusy(null), false);
+  assert.equal(segmentUi.isSegmentJobBusy({ state: "ready" }), false);
+  assert.equal(segmentUi.isSegmentJobBusy({ state: "recording" }), true);
+  assert.equal(segmentUi.isSegmentJobBusy({ state: "merging" }), true);
+  assert.equal(segmentUi.isSegmentJobBusy({ state: "repairing" }), true);
+});
+
 test("builds timestamp, duration, progress, and state labels for every segment", () => {
   const model = buildSegmentRenderModel({
     state: "recording",

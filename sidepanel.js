@@ -4,7 +4,7 @@ import { repairWebmFile } from "./modules/webm-repair.js";
 import { registerHlsAnalysis } from "./modules/hls-analysis.js";
 import { isHttpUrl, isM3u8 } from "./modules/url-utils.js";
 import { createSegmentedRecorderController } from "./modules/segmented-recorder.js";
-import { createSegmentUi, getSegmentedTimerText } from "./modules/segment-ui.js";
+import { createSegmentUi, getSegmentedTimerText, isSegmentJobBusy } from "./modules/segment-ui.js";
 import { createJobHistory } from "./modules/job-history.js";
 
 // Main side-panel coordinator: wires UI events to focused feature modules.
@@ -75,6 +75,7 @@ function restoreRecordingModeForSelectedTab() {
   const segmentedJob = segmentedController?.getJobForTab(tabId);
   const count = segmentedJob?.segments?.length || recordingModeByTab.get(tabId) || 1;
   segmentUi.setMode(count);
+  segmentUi.setBusy(isSegmentJobBusy(segmentedJob));
   recordingModeByTab.set(tabId, segmentUi.getCount());
 }
 
@@ -276,7 +277,7 @@ function renderSegmentedJob(job) {
   segmentedRemoveButton.disabled = ["recording", "merging", "repairing"].includes(state);
   segmentedRetryMergeButton.hidden = state !== "merge_failed";
   segmentedRetryMergeButton.disabled = state !== "merge_failed";
-  segmentUi.setBusy(["recording", "merging", "repairing"].includes(state));
+  segmentUi.setBusy(isSegmentJobBusy(job));
   if (state === "ready") {
     setRecordingStatus("All segment players are ready. Start all segments when ready.", "success");
   } else if (state === "recording") {
