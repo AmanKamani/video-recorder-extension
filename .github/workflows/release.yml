@@ -1,0 +1,163 @@
+name: Release Extension
+
+on:
+  push:
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Commit SHA to package"
+        required: true
+        type: string
+      tag_name:
+        description: "Release tag, for example v1.8.4"
+        required: true
+        type: string
+      previous_tag:
+        description: "Previous release tag used for generated notes"
+        required: false
+        type: string
+      draft:
+        description: "Create as a draft release"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || github.ref }}
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_REF }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('manifest.json')).version")"
+          EXPECTED_TAG="v${VERSION}"
+          TARGET_SHA="$(git rev-parse HEAD)"
+
+          if [[ "${TAG_NAME}" != "${EXPECTED_TAG}" ]]; then
+            echo "Tag ${TAG_NAME} does not match manifest version ${VERSION}."
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${TARGET_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install dependencies and run tests
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: |
+          npm ci
+          npm test
+
+      - name: Run basic checks for legacy versions
+        if: ${{ hashFiles('package-lock.json') == '' }}
+        run: |
+          node --check background.js
+          node --check sidepanel.js
+
+      - name: Build extension ZIP
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.release.outputs.version }}"
+          STAGING="dist/extension"
+          ZIP_PATH="dist/hls-side-panel-pro-v${VERSION}.zip"
+
+          rm -rf dist
+          mkdir -p "${STAGING}"
+
+          # Files required by every historical version.
+          cp manifest.json background.js sidepanel.html sidepanel.js icon.png "${STAGING}/"
+
+          # Modern extension layout.
+          if [[ -d modules ]]; then
+            cp -R modules "${STAGING}/"
+          fi
+
+          if [[ -d assets ]]; then
+            cp -R assets "${STAGING}/"
+          fi
+
+          # Legacy versions loaded HLS.js directly from the extension root.
+          if [[ ! -d modules && -f hls.min.js ]]; then
+            cp hls.min.js "${STAGING}/"
+          fi
+
+          find "${STAGING}" -name ".DS_Store" -delete
+
+          (
+            cd "${STAGING}"
+            zip -r "../$(basename "${ZIP_PATH}")" .
+          )
+
+          unzip -Z1 "${ZIP_PATH}" > dist/zip-contents.txt
+
+          grep -qx "manifest.json" dist/zip-contents.txt
+
+          if grep -Eq '(^|/)(tests|docs|node_modules|\.git|\.github)(/|$)|(^|/)\.DS_Store$|(^|/)package(-lock)?\.json$|(^|/)README' dist/zip-contents.txt; then
+            echo "The ZIP contains forbidden development files:"
+            cat dist/zip-contents.txt
+            exit 1
+          fi
+
+          echo "zip_path=${ZIP_PATH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP_PATH: ${{ steps.package.outputs.zip_path }}
+          TARGET_SHA: ${{ steps.release.outputs.sha }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+          CREATE_DRAFT: ${{ inputs.draft }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARGS=(
+            release create "${TAG_NAME}"
+            "${ZIP_PATH}"
+            --repo "${GITHUB_REPOSITORY}"
+            --target "${TARGET_SHA}"
+            --title "HLS Side Panel Pro ${TAG_NAME}"
+            --generate-notes
+          )
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${PREVIOUS_TAG}" ]]; then
+            ARGS+=(--notes-start-tag "${PREVIOUS_TAG}")
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${CREATE_DRAFT}" == "true" ]]; then
+            ARGS+=(--draft)
+          fi
+
+          gh "${ARGS[@]}"
