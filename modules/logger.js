@@ -1,9 +1,15 @@
+import { SEGMENT_CONFIG } from "./config.js";
+
 /**
  * Session logger for the side panel.
  * Keeps structured entries for copying, renders a bounded visual history, and
  * uses textContent rather than HTML interpolation so diagnostic text is safe.
  */
-export function createLogger({ logsArea, visibleLimit = 300 } = {}) {
+export function createLogger({
+  logsArea,
+  visibleLimit = SEGMENT_CONFIG.visibleLogEntries,
+  retainedLimit = SEGMENT_CONFIG.retainedLogEntries,
+} = {}) {
   const entries = [];
 
   /** Adds a timestamped entry to the in-memory log and displays it in the bounded log panel. */
@@ -11,6 +17,7 @@ export function createLogger({ logsArea, visibleLimit = 300 } = {}) {
     const timestamp = new Date().toLocaleTimeString();
     const text = typeof message === "string" ? message : String(message);
     entries.push({ level, message: text, timestamp });
+    if (entries.length > retainedLimit) entries.splice(0, entries.length - retainedLimit);
 
     if (!logsArea) return;
     const entry = document.createElement("div");

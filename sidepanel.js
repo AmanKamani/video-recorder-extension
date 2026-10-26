@@ -3,6 +3,7 @@ import { createRecorderController } from "./modules/recorder.js";
 import { repairWebmFile } from "./modules/webm-repair.js";
 import { registerHlsAnalysis } from "./modules/hls-analysis.js";
 import { isHttpUrl, isM3u8 } from "./modules/url-utils.js";
+import { SEGMENT_CONFIG } from "./modules/config.js";
 import { createSegmentedRecorderController } from "./modules/segmented-recorder.js";
 import { createSegmentUi, getSegmentedTimerText, isSegmentJobBusy } from "./modules/segment-ui.js";
 import { createJobHistory } from "./modules/job-history.js";
@@ -25,7 +26,7 @@ let segmentedController = null;
 let segmentUi = null;
 /** Keeps the recording buttons aligned with the selected tab and its current player/recorder state. */
 function syncRecorderControls() {
-  if (segmentUi?.isSegmented()) {
+  if (segmentUi?.isManagedMode()) {
     return segmentedController?.syncSelectedTab() || Promise.resolve();
   }
   return recorderController ? recorderController.syncRecorderControls() : Promise.resolve();
@@ -52,8 +53,9 @@ let selectedButton = null;
 let selectedPlaylistTabId = null;
 let tabRefreshGeneration = 0;
 let followActiveTab = true;
-let segmentedPreparationGeneration = 0;
+const segmentedPreparationGenerationByTab = new Map();
 const recordingModeByTab = new Map();
+const managedModeByTab = new Map();
 
 /** Returns the currently selected playlist URL, if it still belongs to the selected tab. */
 function getSelectedPlaylist() {
@@ -73,8 +75,12 @@ function restoreRecordingModeForSelectedTab() {
   if (!segmentUi) return;
   const tabId = Number(tabSelect.value);
   const segmentedJob = segmentedController?.getJobForTab(tabId);
-  const count = segmentedJob?.segments?.length || recordingModeByTab.get(tabId) || 1;
+  const count =
+    segmentedJob?.segments?.length ||
+    recordingModeByTab.get(tabId) ||
+    SEGMENT_CONFIG.defaultSegments;
   segmentUi.setMode(count);
+  segmentUi.setManagedMode(!!segmentedJob || count > 1 || managedModeByTab.get(tabId) === true);
   segmentUi.setBusy(isSegmentJobBusy(segmentedJob));
   recordingModeByTab.set(tabId, segmentUi.getCount());
 }
@@ -261,14 +267,18 @@ const segmentedRetryMergeButton = document.getElementById("retrySegmentMerge");
 const QUALITY_LOCK_STORAGE_KEY = "segmentedQualityLockEnabled";
 
 /** Mirrors a segmented job snapshot into the sidebar controls for the selected tab. */
-function renderSegmentedJob(job) {
+function renderSegmentedJob(job, sourceTabId = job?.tabId) {
   if (!segmentUi) return;
-  if (job && Number(tabSelect.value) !== job.tabId) return;
+  if (sourceTabId && Number(tabSelect.value) !== sourceTabId) return;
   if (job && segmentUi.getCount() !== job.segments.length) {
     segmentUi.setMode(job.segments.length);
   }
-  if (job) recordingModeByTab.set(job.tabId, job.segments.length);
-  if (!segmentUi.isSegmented()) return;
+  if (job) {
+    recordingModeByTab.set(job.tabId, job.segments.length);
+    managedModeByTab.set(job.tabId, true);
+    segmentUi.setManagedMode(true);
+  }
+  if (!segmentUi.isManagedMode()) return;
   segmentUi.renderJob(job);
   segmentedTimerEl.textContent = getSegmentedTimerText(job);
   const state = job?.state || "idle";
@@ -279,9 +289,19 @@ function renderSegmentedJob(job) {
   segmentedRetryMergeButton.disabled = state !== "merge_failed";
   segmentUi.setBusy(isSegmentJobBusy(job));
   if (state === "ready") {
-    setRecordingStatus("All segment players are ready. Start all segments when ready.", "success");
+    setRecordingStatus(
+      job.segments.length === 1
+        ? "The managed segment player is ready."
+        : "All segment players are ready. Start all segments when ready.",
+      "success",
+    );
   } else if (state === "recording") {
-    setRecordingStatus("All segments are recording in parallel.", "recording");
+    setRecordingStatus(
+      job.segments.length === 1
+        ? "The managed segment is recording."
+        : "All segments are recording in parallel.",
+      "recording",
+    );
   } else if (state === "merging") {
     setRecordingStatus("All segments finished. Merging the WebM container…", "working");
   } else if (state === "repairing") {
@@ -303,43 +323,60 @@ function renderSegmentedJob(job) {
   }
 }
 
-/** Automatically prepares parallel page players for the selected playlist and tab. */
+/** Automatically prepares one or more managed players for the selected playlist and tab. */
 async function prepareSegmentedMode(
   count = segmentUi?.getCount(),
   lockQuality = segmentUi?.isQualityLockEnabled(),
 ) {
-  if (!segmentUi || count <= 1) return;
-  const generation = ++segmentedPreparationGeneration;
+  if (!segmentUi || count < 1) return;
+  const targetTabId = Number(tabSelect.value);
+  const generation = (segmentedPreparationGenerationByTab.get(targetTabId) || 0) + 1;
+  segmentedPreparationGenerationByTab.set(targetTabId, generation);
   segmentUi.setBusy(true);
   segmentedStartButton.disabled = true;
   segmentedStopButton.disabled = true;
-  setRecordingStatus(`Preparing ${count} parallel segment players…`, "working");
+  setRecordingStatus(
+    count === 1 ? "Preparing one managed segment player…" : `Preparing ${count} segment players…`,
+    "working",
+  );
   try {
     const job = await segmentedController.prepareSelectedTab(count, { lockQuality });
-    if (generation !== segmentedPreparationGeneration) return;
+    if (
+      segmentedPreparationGenerationByTab.get(targetTabId) !== generation ||
+      Number(tabSelect.value) !== targetTabId
+    ) {
+      return;
+    }
     renderSegmentedJob(job);
-    setStatus(`Prepared ${count} parallel VOD segments in Tab ${job.tabId}.`);
+    setStatus(
+      `Prepared ${count} managed VOD segment${count === 1 ? "" : "s"} in Tab ${job.tabId}.`,
+    );
   } catch (error) {
-    if (generation !== segmentedPreparationGeneration) return;
+    if (
+      segmentedPreparationGenerationByTab.get(targetTabId) !== generation ||
+      Number(tabSelect.value) !== targetTabId
+    ) {
+      return;
+    }
     segmentUi.renderJob(null);
     setRecordingStatus(error?.message || String(error), "error");
     addLog("error", `Could not prepare segmented recording: ${error?.message || error}`);
   } finally {
-    if (generation === segmentedPreparationGeneration) segmentUi.setBusy(false);
+    if (
+      segmentedPreparationGenerationByTab.get(targetTabId) === generation &&
+      Number(tabSelect.value) === targetTabId
+    ) {
+      segmentUi.setBusy(false);
+    }
   }
 }
 
 segmentUi = createSegmentUi({
   onApply: async (count, lockQuality) => {
     const tabId = Number(tabSelect.value);
-    if (Number.isInteger(tabId) && tabId > 0) recordingModeByTab.set(tabId, count);
-    if (count === 1) {
-      ++segmentedPreparationGeneration;
-      try {
-        await segmentedController?.cleanupSelectedTab();
-      } catch (_) {}
-      await recorderController.syncRecorderControls();
-      return;
+    if (Number.isInteger(tabId) && tabId > 0) {
+      recordingModeByTab.set(tabId, count);
+      managedModeByTab.set(tabId, true);
     }
     await prepareSegmentedMode(count, lockQuality);
   },
@@ -383,10 +420,10 @@ segmentedController = createSegmentedRecorderController({
 
 // Keep elapsed wall time fluid between the less frequent segmented-job state updates.
 setInterval(() => {
-  if (!segmentUi.isSegmented()) return;
+  if (!segmentUi.isManagedMode()) return;
   const job = segmentedController.getJobForTab(Number(tabSelect.value));
   segmentedTimerEl.textContent = getSegmentedTimerText(job);
-}, 250);
+}, SEGMENT_CONFIG.recordingTimerRefreshIntervalMs);
 
 segmentHistory
   .list()
@@ -401,7 +438,7 @@ segmentHistory
   .catch(() => {});
 
 segmentedStartButton.addEventListener("click", async () => {
-  if (!segmentUi.isSegmented()) return;
+  if (!segmentUi.isManagedMode()) return;
   segmentUi.setBusy(true);
   segmentedStartButton.disabled = true;
   setRecordingStatus("Choose the final merged WebM file…", "working");
@@ -424,7 +461,7 @@ segmentedStartButton.addEventListener("click", async () => {
 });
 
 segmentedStopButton.addEventListener("click", async () => {
-  if (!segmentUi.isSegmented()) return;
+  if (!segmentUi.isManagedMode()) return;
   try {
     setRecordingStatus("Stopping the complete segmented job…", "working");
     const result = await segmentedController.stopSelectedJob();
@@ -447,11 +484,17 @@ segmentedRetryMergeButton.addEventListener("click", async () => {
 });
 
 segmentedRemoveButton.addEventListener("click", async () => {
-  if (!segmentUi.isSegmented()) return;
+  if (!segmentUi.isManagedMode()) return;
+  const targetTabId = Number(tabSelect.value);
+  segmentedPreparationGenerationByTab.set(
+    targetTabId,
+    (segmentedPreparationGenerationByTab.get(targetTabId) || 0) + 1,
+  );
   try {
     const result = await segmentedController.cleanupSelectedTab();
     if (!result.ok) throw new Error(result.message);
-    segmentUi.reset();
+    managedModeByTab.set(targetTabId, false);
+    if (Number(tabSelect.value) === targetTabId) segmentUi.reset();
     setRecordingStatus(result.message, "idle");
   } catch (error) {
     setRecordingStatus(error?.message || String(error), "error");
@@ -484,9 +527,10 @@ async function scanSelectedTab() {
       target: {
         tabId: tab.id,
       },
+      args: [SEGMENT_CONFIG.maxDiscoveredPlaylists],
 
       // Executes a small, read-only diagnostic in the selected website page.
-      func: () => {
+      func: (maxDiscoveredPlaylists) => {
         // Resource Timing is page-local, but it can contain old playlists when
         // a course SPA changes videos without navigating. Keep the most recent
         // occurrence of each URL and return newest-first so the current stream
@@ -509,7 +553,7 @@ async function scanSelectedTab() {
         }
         return [...latestByUrl.values()]
           .sort((a, b) => b.lastSeen - a.lastSeen)
-          .slice(0, 60)
+          .slice(0, maxDiscoveredPlaylists)
           .map((item) => item.url);
       },
     });
@@ -555,8 +599,8 @@ async function scanSelectedTab() {
         selectedPlaylistTabId = tab.id;
         button.classList.add("selected");
         setStatus(
-          segmentUi?.isSegmented()
-            ? "Playlist selected. Apply the segment count to create the parallel players."
+          segmentUi?.isManagedMode()
+            ? "Playlist selected. Apply the segment count to create managed segment players."
             : "Playlist selected for this tab. Use Analyze Selected HLS or WebM Recorder > Inject Player.",
         );
       });
@@ -671,8 +715,9 @@ inspectPlayerButton.addEventListener("click", async () => {
     const libraryInfo = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       world: "MAIN",
+      args: [SEGMENT_CONFIG.diagnostics.maxScriptUrls],
       // Executes a small, read-only diagnostic in the selected website page.
-      func: () => {
+      func: (maxScriptUrls) => {
         const H = window.Hls;
         const config = H?.DefaultConfig;
 
@@ -697,7 +742,7 @@ inspectPlayerButton.addEventListener("click", async () => {
             .map((s) => s.src)
             .filter(Boolean)
             .filter((src) => /hls|player|video/i.test(src))
-            .slice(0, 30),
+            .slice(0, maxScriptUrls),
           videoCount: document.querySelectorAll("video").length,
         };
       },
@@ -775,6 +820,20 @@ testCustomPlayerButton.addEventListener("click", async () => {
   testCustomPlayerButton.disabled = true;
 
   try {
+    const managedJob = segmentedController?.getJobForTab(targetTabId);
+    if (managedJob && ["recording", "merging", "repairing"].includes(managedJob.state)) {
+      throw new Error("Stop the managed recording before injecting a manual player.");
+    }
+    if (managedJob) {
+      const cleanup = await segmentedController.cleanupSelectedTab();
+      if (!cleanup.ok) throw new Error(cleanup.message);
+    }
+    managedModeByTab.set(targetTabId, false);
+    if (Number(tabSelect.value) !== targetTabId) {
+      throw new Error("The selected tab changed. Select its playlist and try injecting again.");
+    }
+    segmentUi.setManagedMode(false);
+
     const tab = await chrome.tabs.get(targetTabId);
     if (Number(tabSelect.value) !== targetTabId) {
       throw new Error("The selected tab changed. Select its playlist and try injecting again.");
@@ -788,9 +847,17 @@ testCustomPlayerButton.addEventListener("click", async () => {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       world: "MAIN",
-      args: [playlistUrl],
+      args: [
+        playlistUrl,
+        {
+          maxRecentHlsEvents: SEGMENT_CONFIG.diagnostics.maxRecentHlsEvents,
+          maxFragmentKeys: SEGMENT_CONFIG.diagnostics.maxFragmentKeys,
+          maxSummaryEvents: SEGMENT_CONFIG.diagnostics.maxSummaryEvents,
+          probeDurationMs: SEGMENT_CONFIG.hlsDiagnosticProbeDurationMs,
+        },
+      ],
       // Runs the HLS test in the website page’s main world so it can use the page’s Hls constructor.
-      func: async (url) => {
+      func: async (url, diagnostics) => {
         // Clean up a previous test instance, if any.
         window.__hlsSidePanelProbe?.hls?.destroy();
         window.__hlsSidePanelProbe?.video?.remove();
@@ -874,7 +941,9 @@ testCustomPlayerButton.addEventListener("click", async () => {
               fatal: data?.fatal ?? false,
             };
             state.recentHlsEvents.push(eventRecord);
-            if (state.recentHlsEvents.length > 100) state.recentHlsEvents.shift();
+            if (state.recentHlsEvents.length > diagnostics.maxRecentHlsEvents) {
+              state.recentHlsEvents.shift();
+            }
             if (eventKey === "FRAG_LOADED") {
               const frag = data?.frag;
               // Reads the event payload defensively because some HLS versions expose unusual payload objects.
@@ -891,7 +960,7 @@ testCustomPlayerButton.addEventListener("click", async () => {
                 urlPresent: !!(frag?.url || frag?._url || frag?.relurl),
                 fragKeys: (() => {
                   try {
-                    return Object.keys(frag || {}).slice(0, 40);
+                    return Object.keys(frag || {}).slice(0, diagnostics.maxFragmentKeys);
                   } catch (_) {
                     return [];
                   }
@@ -943,7 +1012,7 @@ testCustomPlayerButton.addEventListener("click", async () => {
             details: data?.details ?? null,
             fatal: data?.fatal ?? false,
           });
-          if (state.events.length > 30) state.events.shift();
+          if (state.events.length > diagnostics.maxSummaryEvents) state.events.shift();
         };
 
         // Records when HLS has parsed the playlist and is ready to choose media tracks.
@@ -978,7 +1047,7 @@ testCustomPlayerButton.addEventListener("click", async () => {
         hls.attachMedia(video);
 
         // Give the test time to load the playlist, key and initial segments.
-        await new Promise((resolve) => setTimeout(resolve, 12000));
+        await new Promise((resolve) => setTimeout(resolve, diagnostics.probeDurationMs));
 
         return {
           manifestParsed: state.manifestParsed,
@@ -1041,11 +1110,6 @@ tabSelect.addEventListener("change", () => {
   restoreRecordingModeForSelectedTab();
   syncRecorderControls();
 });
-// Reconciles recorder controls after a manual tab-list refresh.
-refreshButton.addEventListener("click", () => {
-  setTimeout(syncRecorderControls, 100);
-});
-
 // Keep the dropdown and recorder controls aligned with the browser tab the user
 // has just switched to. Recording itself remains owned by each individual page.
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -1070,6 +1134,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // Refreshes the selector after a browser tab is closed.
 chrome.tabs.onRemoved.addListener((tabId) => {
   recordingModeByTab.delete(tabId);
+  managedModeByTab.delete(tabId);
+  segmentedPreparationGenerationByTab.delete(tabId);
   segmentedController
     ?.handleTabUnavailable(tabId, "The website tab closed before the segmented job completed.")
     .catch(() => {});
@@ -1090,6 +1156,7 @@ registerHlsAnalysis({
   ensureStreamPermission,
   addLog,
   setStatus,
+  sampleBytes: SEGMENT_CONFIG.diagnostics.hlsSampleBytes,
 });
 
 // Read a safe snapshot of the currently injected page-player diagnostics. This

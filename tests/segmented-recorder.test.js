@@ -10,6 +10,13 @@ import {
   shouldApplySegmentDetail,
 } from "../modules/segmented-recorder.js";
 import * as segmentedRecorder from "../modules/segmented-recorder.js";
+import { SEGMENT_CONFIG } from "../modules/config.js";
+
+const bridgeConfig = {
+  base64SliceBytes: SEGMENT_CONFIG.base64EncodeSliceBytes,
+  highWaterChunks: SEGMENT_CONFIG.bridgeHighWaterChunks,
+  lowWaterChunks: SEGMENT_CONFIG.bridgeLowWaterChunks,
+};
 
 test("decodes relayed segment bytes without sharing mutable buffers", () => {
   const bytes = decodeBase64Chunk("AQID");
@@ -83,9 +90,9 @@ test("reinstalling the page bridge deactivates the stale extension-context liste
   const originalWindow = globalThis.window;
   globalThis.window = fakeWindow;
   try {
-    segmentedRecorder.installSegmentPageBridge();
+    segmentedRecorder.installSegmentPageBridge(bridgeConfig);
     const firstListener = [...listeners][0];
-    segmentedRecorder.installSegmentPageBridge();
+    segmentedRecorder.installSegmentPageBridge(bridgeConfig);
 
     assert.equal(listeners.size, 1);
     assert.notEqual([...listeners][0], firstListener);
@@ -178,7 +185,7 @@ test("suppresses segment-finished relay when its final chunk write fails", async
     },
   };
   try {
-    segmentedRecorder.installSegmentPageBridge();
+    segmentedRecorder.installSegmentPageBridge(bridgeConfig);
     const listener = [...listeners][0];
     const base = {
       source: fakeWindow,

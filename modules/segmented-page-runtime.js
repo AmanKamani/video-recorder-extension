@@ -96,6 +96,16 @@ export function selectLevelForHeight(levels, targetHeight) {
   return selectedIndex;
 }
 
+/** Accepts every whole managed segment count from one through the configured maximum. */
+export function isManagedSegmentCount(segmentCount, maxSegments) {
+  return (
+    Number.isInteger(segmentCount) &&
+    Number.isInteger(maxSegments) &&
+    segmentCount >= 1 &&
+    segmentCount <= maxSegments
+  );
+}
+
 /** Compares decoded dimensions, optionally letting the canonical player establish actual width. */
 export function matchesLockedQualityDimensions(
   videoWidth,
@@ -354,23 +364,32 @@ export async function segmentedPageCommand(command, options = {}) {
       jobId,
       playlistUrl,
       segmentCount,
-      maxSegments = 8,
-      lockQuality = true,
-      fallbackQualityHeight = 720,
-      qualityDimensionTolerancePixels = 4,
+      maxSegments,
+      lockQuality,
+      fallbackQualityHeight,
+      qualityDimensionTolerancePixels,
+      qualityPollIntervalMs,
+      seekToleranceSeconds,
       fixedSegmentDurationSeconds = null,
-      preparationTimeoutMs = 30000,
+      preparationTimeoutMs,
     } = options;
     if (
       !jobId ||
       !playlistUrl ||
       !Number.isInteger(segmentCount) ||
-      segmentCount < 2 ||
-      segmentCount > maxSegments
+      !Number.isInteger(maxSegments) ||
+      segmentCount < 1 ||
+      segmentCount > maxSegments ||
+      !Number.isFinite(preparationTimeoutMs) ||
+      preparationTimeoutMs <= 0 ||
+      !Number.isFinite(qualityPollIntervalMs) ||
+      qualityPollIntervalMs <= 0 ||
+      !Number.isFinite(seekToleranceSeconds) ||
+      seekToleranceSeconds < 0
     ) {
       return {
         ok: false,
-        message: `A playlist, job ID, and segment count from 2 to ${maxSegments} are required.`,
+        message: `A playlist, job ID, and segment count from 1 to ${maxSegments} are required.`,
       };
     }
     const HlsConstructor = window.Hls;
@@ -543,7 +562,10 @@ export async function segmentedPageCommand(command, options = {}) {
         /** Rechecks duration, seek position, and decoded-data readiness after media events. */
         const onMedia = () => {
           if (!Number.isFinite(segment.video.duration) || segment.video.duration <= 0) return;
-          if (seekTime !== null && Math.abs(segment.video.currentTime - seekTime) > 0.35) {
+          if (
+            seekTime !== null &&
+            Math.abs(segment.video.currentTime - seekTime) > seekToleranceSeconds
+          ) {
             try {
               segment.video.currentTime = seekTime;
             } catch (_) {}
@@ -703,7 +725,7 @@ export async function segmentedPageCommand(command, options = {}) {
               );
             }
           };
-          const interval = setInterval(check, 100);
+          const interval = setInterval(check, qualityPollIntervalMs);
           check();
         });
       } finally {
@@ -942,8 +964,43 @@ export async function segmentedPageCommand(command, options = {}) {
     if (!mimeType) return { ok: false, message: "No supported WebM recording format was found." };
     job.mimeType = mimeType;
 
-    job.timesliceMs = options.timesliceMs || 1000;
-    job.progressIntervalMs = Math.max(50, Number(options.progressIntervalMs) || 250);
+    const {
+      timesliceMs,
+      progressIntervalMs,
+      minProgressIntervalMs,
+      seekTimeoutMs,
+      seekToleranceSeconds,
+      segmentMonitorIntervalMs,
+      segmentStallTimeoutMs,
+      segmentWatchdogIntervalMs,
+    } = options;
+    if (
+      !Number.isFinite(timesliceMs) ||
+      timesliceMs <= 0 ||
+      !Number.isFinite(progressIntervalMs) ||
+      progressIntervalMs <= 0 ||
+      !Number.isFinite(minProgressIntervalMs) ||
+      minProgressIntervalMs <= 0 ||
+      !Number.isFinite(seekTimeoutMs) ||
+      seekTimeoutMs <= 0 ||
+      !Number.isFinite(seekToleranceSeconds) ||
+      seekToleranceSeconds < 0 ||
+      !Number.isFinite(segmentMonitorIntervalMs) ||
+      segmentMonitorIntervalMs <= 0 ||
+      !Number.isFinite(segmentStallTimeoutMs) ||
+      segmentStallTimeoutMs <= 0 ||
+      !Number.isFinite(segmentWatchdogIntervalMs) ||
+      segmentWatchdogIntervalMs <= 0
+    ) {
+      return { ok: false, message: "Segment recording timing configuration is invalid." };
+    }
+    job.timesliceMs = timesliceMs;
+    job.progressIntervalMs = Math.max(minProgressIntervalMs, progressIntervalMs);
+    job.seekTimeoutMs = seekTimeoutMs;
+    job.seekToleranceSeconds = seekToleranceSeconds;
+    job.monitorIntervalMs = segmentMonitorIntervalMs;
+    job.stallTimeoutMs = segmentStallTimeoutMs;
+    job.watchdogIntervalMs = segmentWatchdogIntervalMs;
     const terminalStates = new Set(["finished", "failed", "incompatible"]);
     /** Emits one job terminal result only after every segment reaches a terminal state. */
     const maybeCompletePass = () => {
@@ -1161,7 +1218,7 @@ export async function segmentedPageCommand(command, options = {}) {
       } else if (
         !segment.flowPaused &&
         !document.hidden &&
-        Date.now() - (segment.lastProgressAt || Date.now()) > 30000
+        Date.now() - (segment.lastProgressAt || Date.now()) > job.stallTimeoutMs
       ) {
         failSegment(segment, new Error(`Segment ${segment.index + 1} stopped making progress.`));
         return;
@@ -1199,7 +1256,7 @@ export async function segmentedPageCommand(command, options = {}) {
       if (typeof segment.video.requestVideoFrameCallback === "function") {
         segment.video.requestVideoFrameCallback(() => monitor(segment, generation));
       } else {
-        setTimeout(() => monitor(segment, generation), 100);
+        setTimeout(() => monitor(segment, generation), job.monitorIntervalMs);
       }
     };
     /** Seeks, captures, records, and monitors one segment attempt. */
@@ -1218,12 +1275,12 @@ export async function segmentedPageCommand(command, options = {}) {
         await new Promise((resolve, reject) => {
           const timeout = setTimeout(
             () => reject(new Error(`Segment ${segment.index + 1} retry seek timed out.`)),
-            30000,
+            job.seekTimeoutMs,
           );
           /** Resolves the retry seek once the target has decoded current data. */
           const ready = () => {
             if (
-              Math.abs(segment.video.currentTime - segment.startTime) <= 0.35 &&
+              Math.abs(segment.video.currentTime - segment.startTime) <= job.seekToleranceSeconds &&
               segment.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
             ) {
               clearTimeout(timeout);
@@ -1300,12 +1357,12 @@ export async function segmentedPageCommand(command, options = {}) {
             segment.state === "recording" &&
             !segment.flowPaused &&
             !document.hidden &&
-            Date.now() - segment.lastProgressAt > 30000,
+            Date.now() - segment.lastProgressAt > job.stallTimeoutMs,
         );
         if (stalled) {
           failSegment(stalled, new Error(`Segment ${stalled.index + 1} stopped making progress.`));
         }
-      }, 1000);
+      }, job.watchdogIntervalMs);
     };
     job.failSegment = failSegment;
     job.startSegment = startSegment;

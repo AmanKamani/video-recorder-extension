@@ -60,6 +60,14 @@ test("selects the closest HLS level to the locked target height", () => {
   assert.equal(selectLevelForHeight([{ bitrate: 1_000_000 }], 720), -1);
 });
 
+test("accepts one through the configured maximum as managed segment counts", () => {
+  assert.equal(typeof segmentedPageRuntime.isManagedSegmentCount, "function");
+  assert.equal(segmentedPageRuntime.isManagedSegmentCount(1, 15), true);
+  assert.equal(segmentedPageRuntime.isManagedSegmentCount(15, 15), true);
+  assert.equal(segmentedPageRuntime.isManagedSegmentCount(0, 15), false);
+  assert.equal(segmentedPageRuntime.isManagedSegmentCount(16, 15), false);
+});
+
 test("accepts codec padding near the locked rendition but rejects another quality", () => {
   assert.equal(typeof segmentedPageRuntime.matchesLockedQualityDimensions, "function");
   const matchesLockedQualityDimensions = segmentedPageRuntime.matchesLockedQualityDimensions;
