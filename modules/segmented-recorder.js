@@ -91,7 +91,18 @@ export function classifyMergeFailure(error, segments) {
  * Installs a replaceable ISOLATED-world bridge. The ownership check prevents
  * listeners retained by an invalidated extension context from handling events.
  */
-export function installSegmentPageBridge() {
+export function installSegmentPageBridge({ base64SliceBytes, highWaterChunks, lowWaterChunks }) {
+  if (
+    !Number.isInteger(base64SliceBytes) ||
+    base64SliceBytes <= 0 ||
+    !Number.isInteger(highWaterChunks) ||
+    highWaterChunks <= 0 ||
+    !Number.isInteger(lowWaterChunks) ||
+    lowWaterChunks < 0 ||
+    lowWaterChunks >= highWaterChunks
+  ) {
+    throw new Error("Segment bridge flow-control configuration is invalid.");
+  }
   const BRIDGE_KEY = "__hlsSidePanelSegmentBridgeV2";
   const CHANNEL = "hls-side-panel-segment-recorder-v2";
   /** Identifies events that must wait for pending chunk relays. */
@@ -108,8 +119,8 @@ export function installSegmentPageBridge() {
   /** Encodes transferable chunk bytes for extension messaging. */
   const toBase64 = (bytes) => {
     let binary = "";
-    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    for (let offset = 0; offset < bytes.length; offset += base64SliceBytes) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + base64SliceBytes));
     }
     return btoa(binary);
   };
@@ -131,7 +142,7 @@ export function installSegmentPageBridge() {
       const pending = (pendingBySegment.get(key) || 0) + 1;
       pendingBySegment.set(key, pending);
       // Bound page-side production while extension writes drain in order.
-      if (pending >= 4) {
+      if (pending >= highWaterChunks) {
         window.postMessage(
           {
             channel: CHANNEL,
@@ -158,7 +169,7 @@ export function installSegmentPageBridge() {
         .finally(() => {
           const remaining = Math.max(0, (pendingBySegment.get(key) || 1) - 1);
           pendingBySegment.set(key, remaining);
-          if (remaining <= 1) {
+          if (remaining <= lowWaterChunks) {
             window.postMessage(
               {
                 channel: CHANNEL,
@@ -279,6 +290,13 @@ export function createSegmentedRecorderController({
       target: { tabId },
       world: "ISOLATED",
       func: installSegmentPageBridge,
+      args: [
+        {
+          base64SliceBytes: SEGMENT_CONFIG.base64EncodeSliceBytes,
+          highWaterChunks: SEGMENT_CONFIG.bridgeHighWaterChunks,
+          lowWaterChunks: SEGMENT_CONFIG.bridgeLowWaterChunks,
+        },
+      ],
     });
   }
 
@@ -330,6 +348,8 @@ export function createSegmentedRecorderController({
       lockQuality,
       fallbackQualityHeight: SEGMENT_CONFIG.qualityLock.fallbackHeight,
       qualityDimensionTolerancePixels: SEGMENT_CONFIG.qualityLock.dimensionTolerancePixels,
+      qualityPollIntervalMs: SEGMENT_CONFIG.qualityLock.pollIntervalMs,
+      seekToleranceSeconds: SEGMENT_CONFIG.seekToleranceSeconds,
       fixedSegmentDurationSeconds: SEGMENT_CONFIG.temporaryMergeTest.enabled
         ? SEGMENT_CONFIG.temporaryMergeTest.segmentDurationSeconds
         : null,
@@ -364,9 +384,9 @@ export function createSegmentedRecorderController({
     jobsByTab.set(tab.id, job);
     addLog(
       "info",
-      `Tab ${tab.id}: prepared ${effectiveSegmentCount} parallel recording segments${
-        job.quality?.locked ? ` with quality locked near ${job.quality.targetHeight}p` : ""
-      }.`,
+      `Tab ${tab.id}: prepared ${effectiveSegmentCount} managed recording segment${
+        effectiveSegmentCount === 1 ? "" : "s"
+      }${job.quality?.locked ? ` with quality locked near ${job.quality.targetHeight}p` : ""}.`,
     );
     if (job.streamMetadata) {
       addLog(
@@ -454,6 +474,12 @@ export function createSegmentedRecorderController({
         jobId: job.jobId,
         timesliceMs: SEGMENT_CONFIG.recorderTimesliceMs,
         progressIntervalMs: SEGMENT_CONFIG.progressIntervalMs,
+        minProgressIntervalMs: SEGMENT_CONFIG.minProgressIntervalMs,
+        seekTimeoutMs: SEGMENT_CONFIG.seekTimeoutMs,
+        seekToleranceSeconds: SEGMENT_CONFIG.seekToleranceSeconds,
+        segmentMonitorIntervalMs: SEGMENT_CONFIG.segmentMonitorIntervalMs,
+        segmentStallTimeoutMs: SEGMENT_CONFIG.segmentStallTimeoutMs,
+        segmentWatchdogIntervalMs: SEGMENT_CONFIG.segmentWatchdogIntervalMs,
       });
       if (!result.ok) throw new Error(result.message);
       for (const segment of job.segments) {
@@ -870,6 +896,9 @@ export function createSegmentedRecorderController({
   /** Removes page players and temporary files for an inactive selected job. */
   async function cleanupSelectedTab() {
     const tabId = Number(tabSelect.value);
+    // Supersede preparation that may still be waiting on permission, bridge
+    // installation, or the page command for this tab.
+    preparationGenerationByTab.set(tabId, (preparationGenerationByTab.get(tabId) || 0) + 1);
     const job = jobsByTab.get(tabId);
     if (
       job &&
@@ -882,7 +911,7 @@ export function createSegmentedRecorderController({
     if (result.ok) {
       if (job) await removeTemporaryFiles(job);
       jobsByTab.delete(tabId);
-      onJobUpdate(null);
+      onJobUpdate(null, tabId);
     }
     return result;
   }
@@ -892,7 +921,7 @@ export function createSegmentedRecorderController({
     const tabId = Number(tabSelect.value);
     const job = jobsByTab.get(tabId) || null;
     if (job) notifyUpdate(job);
-    else onJobUpdate(null);
+    else onJobUpdate(null, tabId);
     return job;
   }
 

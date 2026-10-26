@@ -30,7 +30,10 @@ const formatQualityLock = (job) => {
 export function normalizeSegmentCount(value) {
   return Math.max(
     SEGMENT_CONFIG.minSegments,
-    Math.min(SEGMENT_CONFIG.maxSegments, Math.round(Number(value) || 1)),
+    Math.min(
+      SEGMENT_CONFIG.maxSegments,
+      Math.round(Number(value) || SEGMENT_CONFIG.defaultSegments),
+    ),
   );
 }
 
@@ -49,6 +52,11 @@ export function getSegmentedTimerText(job, now = Date.now()) {
 /** Reports whether the selected tab's segmented job must lock configuration controls. */
 export function isSegmentJobBusy(job) {
   return ["recording", "merging", "repairing"].includes(job?.state);
+}
+
+/** Selects the managed recorder after Apply, or inherently for multiple segments. */
+export function usesManagedRecorder(segmentCount, managedApplied) {
+  return !!managedApplied || Number(segmentCount) > 1;
 }
 
 /** Converts a controller snapshot into safe, display-only segment rows. */
@@ -92,6 +100,7 @@ export function createSegmentUi({
     : normalizeSegmentCount(countInput?.value);
   let pendingCount = modeCount;
   let busy = false;
+  let managedApplied = false;
   const rowsById = new Map();
   const retryingIds = new Set();
   if (qualityLockInput) qualityLockInput.checked = SEGMENT_CONFIG.qualityLock.enabled;
@@ -104,7 +113,7 @@ export function createSegmentUi({
   if (countHint) {
     countHint.textContent = testMode.enabled
       ? `Temporary test mode: ${testMode.segmentCount} segments × ${testMode.segmentDurationSeconds} seconds. Apply to prepare.`
-      : `Choose 2–${SEGMENT_CONFIG.maxSegments}, then apply to prepare parallel VOD segment players.`;
+      : `Choose 1–${SEGMENT_CONFIG.maxSegments}, then apply to prepare managed VOD segment players.`;
   }
 
   /** Reflects the unapplied segment count in its controls. */
@@ -120,24 +129,41 @@ export function createSegmentUi({
     pendingCount = modeCount;
     if (countInput) countInput.dataset.appliedCount = String(modeCount);
     renderPendingCount();
-    const segmented = modeCount > 1;
+    const managed = usesManagedRecorder(modeCount, managedApplied);
+    const multiple = modeCount > 1;
     if (injectButton) {
-      injectButton.hidden = segmented;
-      injectButton.disabled = segmented;
+      injectButton.hidden = multiple;
+      injectButton.disabled = multiple || busy;
     }
     if (startButton) {
-      startButton.textContent = segmented
-        ? "Start All Segments (Choose File)"
+      startButton.dataset.managedRecording = String(managed);
+      startButton.textContent = managed
+        ? multiple
+          ? "Start All Segments (Choose File)"
+          : "Start Segment (Choose File)"
         : "Start Recording (Choose File)";
     }
-    if (stopButton) stopButton.textContent = segmented ? "Stop Entire Job" : "Stop & Download";
+    if (stopButton) {
+      stopButton.dataset.managedRecording = String(managed);
+      stopButton.textContent = managed ? "Stop Entire Job" : "Stop & Download";
+    }
     if (removeButton)
-      removeButton.textContent = segmented ? "Remove Segment Players" : "Remove Player";
-    if (summary && !segmented) summary.textContent = "Single-player recording mode.";
-    if (list && !segmented) {
+      removeButton.textContent = managed
+        ? multiple
+          ? "Remove Segment Players"
+          : "Remove Segment Player"
+        : "Remove Player";
+    if (summary && !managed) summary.textContent = "Manual injected-player recording mode.";
+    if (list && !managed) {
       list.replaceChildren();
       rowsById.clear();
     }
+  };
+
+  /** Switches between managed segment recording and manual injected-player recording. */
+  const setManagedMode = (enabled) => {
+    managedApplied = !!enabled;
+    setMode(modeCount);
   };
 
   /** Incrementally renders one job snapshot into stable segment rows. */
@@ -146,16 +172,15 @@ export function createSegmentUi({
     if (!job) {
       list.replaceChildren();
       rowsById.clear();
-      summary.textContent =
-        modeCount > 1
-          ? "Select a playlist to prepare parallel segment players."
-          : "Single-player recording mode.";
+      summary.textContent = usesManagedRecorder(modeCount, managedApplied)
+        ? "Select a playlist and apply to prepare managed segment players."
+        : "Manual injected-player recording mode.";
       return;
     }
     const qualityLock = formatQualityLock(job);
-    summary.textContent = `${job.segments.length} segments · ${labelState(job.state)}${
-      qualityLock ? ` · ${qualityLock}` : ""
-    }`;
+    summary.textContent = `${job.segments.length} segment${
+      job.segments.length === 1 ? "" : "s"
+    } · ${labelState(job.state)}${qualityLock ? ` · ${qualityLock}` : ""}`;
     const items = buildSegmentRenderModel(job);
     const activeIds = new Set(items.map((item) => item.id));
     // Remove only stale rows so active progress elements keep their DOM identity.
@@ -230,6 +255,7 @@ export function createSegmentUi({
     if (countInput) countInput.disabled = busy || testMode.enabled;
     if (applyButton) applyButton.disabled = busy;
     if (qualityLockInput) qualityLockInput.disabled = busy;
+    if (injectButton) injectButton.disabled = modeCount > 1 || busy;
   };
 
   if (countInput) {
@@ -240,6 +266,7 @@ export function createSegmentUi({
   }
   if (applyButton) {
     applyButton.addEventListener("click", () => {
+      managedApplied = true;
       setMode(pendingCount);
       onApply(modeCount, qualityLockInput?.checked ?? SEGMENT_CONFIG.qualityLock.enabled);
     });
@@ -256,8 +283,8 @@ export function createSegmentUi({
     getCount: () => modeCount,
     /** Returns the edited segment count before it is applied. */
     getPendingCount: () => pendingCount,
-    /** Reports whether the applied mode uses multiple segments. */
-    isSegmented: () => modeCount > 1,
+    /** Reports whether controls belong to the managed segment recorder. */
+    isManagedMode: () => usesManagedRecorder(modeCount, managedApplied),
     /** Returns the current quality-lock preference. */
     isQualityLockEnabled: () => qualityLockInput?.checked ?? SEGMENT_CONFIG.qualityLock.enabled,
     /** Updates the quality-lock control from a persisted value. */
@@ -270,9 +297,14 @@ export function createSegmentUi({
       }
     },
     setMode,
+    setManagedMode,
     renderJob,
     setBusy,
     /** Clears the rendered job while preserving the selected mode. */
-    reset: () => renderJob(null),
+    reset: () => {
+      managedApplied = false;
+      setMode(modeCount);
+      renderJob(null);
+    },
   };
 }

@@ -11,6 +11,7 @@ export function registerHlsAnalysis({
   ensureStreamPermission,
   addLog,
   setStatus,
+  sampleBytes,
 }) {
   /******** Direct-download feasibility analysis (read-only diagnostics) ********/
   const analyzeHlsButton = document.getElementById("analyzeHls");
@@ -235,7 +236,7 @@ export function registerHlsAnalysis({
             try {
               const response = await fetch(seg.uri, { credentials: "include", cache: "no-store" });
               if (!response.ok) throw new Error(`HTTP ${response.status}`);
-              const sample = new Uint8Array(await response.arrayBuffer()).slice(0, 512);
+              const sample = new Uint8Array(await response.arrayBuffer()).slice(0, sampleBytes);
               playlist.firstSegmentProbe = {
                 httpStatus: response.status,
                 contentType: response.headers.get("content-type") || "",

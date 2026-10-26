@@ -459,14 +459,16 @@
             </button>
           </div>
           <p id="segmentCountHint" class="hint">
-            Choose a count, then apply to prepare parallel VOD segment players.
+            Choose a count, then apply to prepare managed VOD segment players.
           </p>
           <label class="segment-option" for="segmentQualityLock">
             <input id="segmentQualityLock" type="checkbox" checked />
-            <span>Lock consistent quality during preparation</span>
+            <span>Lock managed segment quality during preparation</span>
           </label>
         </div>
-        <div id="segmentSummary" class="hint" role="status">Single-player recording mode.</div>
+        <div id="segmentSummary" class="hint" role="status">
+          Manual injected-player recording mode.
+        </div>
         <div id="segmentList" class="segment-list" aria-live="polite"></div>
         <div id="recordingStatus" role="status" aria-live="polite" data-state="idle">
           Inject the player and start playback first. Choose a file before each recording.

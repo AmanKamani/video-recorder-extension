@@ -43,6 +43,13 @@ test("derives busy controls from the selected tab's own segmented job", () => {
   assert.equal(segmentUi.isSegmentJobBusy({ state: "repairing" }), true);
 });
 
+test("treats an applied count of one as managed recording mode", () => {
+  assert.equal(typeof segmentUi.usesManagedRecorder, "function");
+  assert.equal(segmentUi.usesManagedRecorder(1, false), false);
+  assert.equal(segmentUi.usesManagedRecorder(1, true), true);
+  assert.equal(segmentUi.usesManagedRecorder(2, false), true);
+});
+
 test("builds timestamp, duration, progress, and state labels for every segment", () => {
   const model = buildSegmentRenderModel({
     state: "recording",

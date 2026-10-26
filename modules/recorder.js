@@ -4,6 +4,8 @@
  * lifecycle coordination, WebM repair, status rendering, and completion messages.
  * The selected-tab and permission helpers are injected from the side-panel app.
  */
+import { SEGMENT_CONFIG } from "./config.js";
+
 export function createRecorderController({
   tabSelect,
   injectButton,
@@ -20,8 +22,7 @@ export function createRecorderController({
   const stopRecordingButton = document.getElementById("stopRecording");
   const removeSitePlayerButton = document.getElementById("removeSitePlayer");
   const segmentCountInput = document.getElementById("segmentCount");
-  const segmentedModeEnabled = () =>
-    Number(document.getElementById("segmentCount")?.dataset.appliedCount || 1) > 1;
+  const segmentedModeEnabled = () => startRecordingButton?.dataset.managedRecording === "true";
 
   // Bridge chunk data from the page's MAIN world to the extension side panel.
   // The queue preserves chunk order and waits for each disk write acknowledgement.
@@ -29,7 +30,11 @@ export function createRecorderController({
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "ISOLATED",
-      func: () => {
+      args: [SEGMENT_CONFIG.base64EncodeSliceBytes],
+      func: (base64SliceBytes) => {
+        if (!Number.isInteger(base64SliceBytes) || base64SliceBytes <= 0) {
+          throw new Error("Recording bridge base64 slice configuration is invalid.");
+        }
         if (window.__hlsSidePanelFileBridgeInstalledV1) return;
         window.__hlsSidePanelFileBridgeInstalledV1 = true;
         let bridgeQueue = Promise.resolve();
@@ -37,7 +42,7 @@ export function createRecorderController({
         // Encodes chunk bytes for runtime messaging, processing them in smaller slices to avoid large argument lists.
         const toBase64 = (bytes) => {
           let binary = "";
-          const step = 0x8000;
+          const step = base64SliceBytes;
           for (let offset = 0; offset < bytes.length; offset += step) {
             binary += String.fromCharCode(
               ...bytes.subarray(offset, Math.min(offset + step, bytes.length)),
@@ -154,7 +159,10 @@ export function createRecorderController({
     recordingStartedAt = Date.now();
     recordingTimerEl.textContent = "00:00";
     clearInterval(recordingTimerInterval);
-    recordingTimerInterval = setInterval(updateRecordingTimer, 250);
+    recordingTimerInterval = setInterval(
+      updateRecordingTimer,
+      SEGMENT_CONFIG.recordingTimerRefreshIntervalMs,
+    );
   }
 
   /** Stops the UI timer and clears its interval handle. */
@@ -448,7 +456,10 @@ export function createRecorderController({
             document.body.appendChild(link);
             link.click();
             link.remove();
-            setTimeout(() => URL.revokeObjectURL(downloadUrl), 60000);
+            setTimeout(
+              () => URL.revokeObjectURL(downloadUrl),
+              actionOptions.objectUrlRevokeDelayMs,
+            );
             recording.downloadStarted = true;
             probe.lastRecording = {
               bytes: blob.size,
@@ -493,7 +504,7 @@ export function createRecorderController({
           // Ensures the end-of-video handler runs once for this recording.
           video.addEventListener("ended", recording.autoStopHandler, { once: true });
           probe.recording = recording;
-          recorder.start(1000);
+          recorder.start(actionOptions.timesliceMs);
           enableRecordingGuard();
           return {
             ok: true,
@@ -527,7 +538,10 @@ export function createRecorderController({
   }
 
   /** Waits for the selected tab’s recording session to finish writing and repairing its WebM file. */
-  async function waitForDownloadFinalization(tabId, timeoutMs = 12000) {
+  async function waitForDownloadFinalization(
+    tabId,
+    timeoutMs = SEGMENT_CONFIG.downloadFinalizationTimeoutMs,
+  ) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       try {
@@ -540,7 +554,9 @@ export function createRecorderController({
         // The user may have navigated away while the recorder was finalizing.
         return false;
       }
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) =>
+        setTimeout(resolve, SEGMENT_CONFIG.downloadFinalizationPollIntervalMs),
+      );
     }
     return false;
   }
@@ -549,9 +565,20 @@ export function createRecorderController({
   async function syncRecorderControls() {
     if (segmentedModeEnabled()) return;
     if (recorderUiBusy) return;
+    const requestedTabId = Number(tabSelect.value);
     try {
       const tab = await getSelectedTab();
+      if (
+        segmentedModeEnabled() ||
+        tab.id !== requestedTabId ||
+        Number(tabSelect.value) !== requestedTabId
+      ) {
+        return;
+      }
       const state = await executeOnSelectedPage("status", tab.id);
+      // Ignore a manual status response when tab selection or recording mode
+      // changed while the page command was in flight.
+      if (segmentedModeEnabled() || Number(tabSelect.value) !== requestedTabId) return;
       if (state.permissionMissing) {
         // Do not prompt from background polling; access is requested only by a
         // deliberate user action such as Scan, Inject Player, or Analyze HLS.
@@ -590,7 +617,7 @@ export function createRecorderController({
           : "00:00";
         if (state.lastRecording && state.lastRecording.finishedAt) {
           const age = Date.now() - state.lastRecording.finishedAt;
-          if (age < 15000) {
+          if (age < SEGMENT_CONFIG.recentRecordingStatusDurationMs) {
             setRecordingStatus(
               `Last recording saved (${state.lastRecording.reason === "ended" ? "video ended" : "stopped manually"}).`,
               "success",
@@ -619,6 +646,7 @@ export function createRecorderController({
         );
       }
     } catch (_) {
+      if (segmentedModeEnabled() || Number(tabSelect.value) !== requestedTabId) return;
       injectButton.disabled = false;
       startRecordingButton.disabled = true;
       stopRecordingButton.disabled = true;
@@ -827,6 +855,8 @@ export function createRecorderController({
         storageMode: "file",
         sessionId,
         filename: session.filename,
+        timesliceMs: SEGMENT_CONFIG.recorderTimesliceMs,
+        objectUrlRevokeDelayMs: SEGMENT_CONFIG.objectUrlRevokeDelayMs,
       });
       if (!result.ok) throw new Error(result.message);
       session.startedAt = Date.now();
@@ -915,7 +945,7 @@ export function createRecorderController({
     if (recordingStartedAt !== null)
       recordingTimerEl.textContent = formatDuration(Date.now() - recordingStartedAt);
     syncRecorderControls();
-  }, 1000);
+  }, SEGMENT_CONFIG.recorderStatusPollIntervalMs);
 
   // Initialize button state for a new side-panel instance, including reopen-after-recording.
   setRecordingStatus("Select a playlist and click Inject Player to set up this tab.", "idle");
